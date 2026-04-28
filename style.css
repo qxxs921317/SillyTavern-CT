@@ -40,21 +40,26 @@
     min-height: 1.2em;
 }
 
-/* --- 캐릭터 카드 아래 번역 표시 영역 --- */
-#peek_translation_panel {
+/* --- 캐릭터 카드 아래 번역 표시 영역 (공통) --- */
+#peek_translation_panel,
+#peek_persona_panel {
     margin: 10px 0;
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 8px;
     background: var(--SmartThemeBlurTintColor);
     overflow: hidden;
-    /* form_create 등 flex 컨테이너 내부에서도 콘텐츠 길이 그대로 유지 */
     flex: none;
     flex-shrink: 0;
     width: 100%;
     box-sizing: border-box;
 }
 
-/* --- 캐릭터 설명 라벨 옆 단축 번역 버튼 (👀) --- */
+/* 페르소나 패널은 살짝 더 컴팩트 */
+#peek_persona_panel {
+    margin: 8px 0;
+}
+
+/* --- 단축 번역 버튼 (👀) - 캐릭터 설명 옆 --- */
 .peek-quick-btn {
     cursor: pointer;
     user-select: none;
@@ -74,7 +79,23 @@
     transform: scale(0.95);
 }
 
-#peek_translation_panel .peek-panel-header {
+/* --- 페르소나 컨트롤의 👀 버튼 (다른 menu_button과 톤 맞추기) --- */
+.peek-persona-btn {
+    font-style: normal;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform 0.15s ease;
+}
+
+.peek-persona-btn:hover {
+    transform: scale(1.1);
+}
+
+/* --- 패널 헤더/바디/푸터 (양쪽 패널 공통) --- */
+#peek_translation_panel .peek-panel-header,
+#peek_persona_panel .peek-panel-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -85,36 +106,43 @@
     font-weight: 600;
 }
 
-#peek_translation_panel .peek-panel-header .peek-title {
+#peek_translation_panel .peek-panel-header .peek-title,
+#peek_persona_panel .peek-panel-header .peek-title {
     display: flex;
     align-items: center;
     gap: 8px;
 }
 
-#peek_translation_panel .peek-panel-header .peek-title-meta {
+#peek_translation_panel .peek-panel-header .peek-title-meta,
+#peek_persona_panel .peek-panel-header .peek-title-meta {
     font-size: 0.8em;
     opacity: 0.6;
     font-weight: normal;
 }
 
-#peek_translation_panel .peek-panel-header .peek-toggle-icon {
+#peek_translation_panel .peek-panel-header .peek-toggle-icon,
+#peek_persona_panel .peek-panel-header .peek-toggle-icon {
     transition: transform 0.2s ease;
 }
 
-#peek_translation_panel.peek-collapsed .peek-toggle-icon {
+#peek_translation_panel.peek-collapsed .peek-toggle-icon,
+#peek_persona_panel.peek-collapsed .peek-toggle-icon {
     transform: rotate(-90deg);
 }
 
-#peek_translation_panel .peek-panel-body {
+#peek_translation_panel .peek-panel-body,
+#peek_persona_panel .peek-panel-body {
     padding: 12px;
     /* 자체 스크롤/높이 제한 없음 — 콘텐츠대로 자연스럽게 늘어남 */
 }
 
-#peek_translation_panel.peek-collapsed .peek-panel-body {
+#peek_translation_panel.peek-collapsed .peek-panel-body,
+#peek_persona_panel.peek-collapsed .peek-panel-body {
     display: none;
 }
 
-#peek_translation_panel .peek-empty {
+#peek_translation_panel .peek-empty,
+#peek_persona_panel .peek-empty {
     text-align: center;
     opacity: 0.5;
     padding: 20px;
@@ -138,7 +166,8 @@
     font-weight: 600;
 }
 
-#peek_translation_panel .peek-field-content {
+#peek_translation_panel .peek-field-content,
+#peek_persona_panel .peek-field-content {
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.5;
@@ -148,7 +177,8 @@
     font-size: 0.95em;
 }
 
-#peek_translation_panel .peek-panel-footer {
+#peek_translation_panel .peek-panel-footer,
+#peek_persona_panel .peek-panel-footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -158,29 +188,34 @@
     opacity: 0.7;
 }
 
-#peek_translation_panel .peek-panel-footer .peek-footer-actions {
+#peek_translation_panel .peek-panel-footer .peek-footer-actions,
+#peek_persona_panel .peek-panel-footer .peek-footer-actions {
     display: flex;
     gap: 8px;
 }
 
-#peek_translation_panel .peek-panel-footer .peek-footer-btn {
+#peek_translation_panel .peek-panel-footer .peek-footer-btn,
+#peek_persona_panel .peek-panel-footer .peek-footer-btn {
     cursor: pointer;
     padding: 2px 6px;
     border-radius: 3px;
     transition: background 0.15s;
 }
 
-#peek_translation_panel .peek-panel-footer .peek-footer-btn:hover {
+#peek_translation_panel .peek-panel-footer .peek-footer-btn:hover,
+#peek_persona_panel .peek-panel-footer .peek-footer-btn:hover {
     background: var(--white30a);
 }
 
 /* --- 로딩 상태 --- */
-#peek_translation_panel.peek-loading .peek-panel-body {
+#peek_translation_panel.peek-loading .peek-panel-body,
+#peek_persona_panel.peek-loading .peek-panel-body {
     opacity: 0.5;
     pointer-events: none;
 }
 
-#peek_translation_panel .peek-loading-indicator {
+#peek_translation_panel .peek-loading-indicator,
+#peek_persona_panel .peek-loading-indicator {
     display: none;
     text-align: center;
     padding: 20px;
@@ -188,6 +223,7 @@
     opacity: 0.7;
 }
 
-#peek_translation_panel.peek-loading .peek-loading-indicator {
+#peek_translation_panel.peek-loading .peek-loading-indicator,
+#peek_persona_panel.peek-loading .peek-loading-indicator {
     display: block;
 }

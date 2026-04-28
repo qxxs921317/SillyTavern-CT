@@ -4,8 +4,9 @@
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, characters, this_chid } from '../../../../script.js';
+import { saveSettingsDebounced, eventSource, event_types, characters, this_chid, user_avatar, name1 } from '../../../../script.js';
 import { Popup } from '../../../popup.js';
+import { power_user } from '../../../power-user.js';
 
 const EXT_ID = 'peek';
 const EXT_NAME = 'Peek 👀';
@@ -23,9 +24,11 @@ const TRANSLATABLE_FIELDS = [
 // 기본 설정
 const defaultSettings = {
     profileId: '',
-    selectedFields: ['description'],  // 기본은 description만 체크
-    translations: {},  // { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
+    selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
+    translations: {},  // 캐릭터: { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
+    personaTranslations: {},  // 페르소나: { [personaAvatar]: { text, translatedAt } }
     panelCollapsed: false,
+    personaPanelCollapsed: false,
 };
 
 /**
@@ -65,6 +68,36 @@ function getCurrentChar() {
 }
 
 /**
+ * 현재 활성 페르소나 정보 가져오기
+ * @returns {{ avatar: string, name: string, description: string } | null}
+ */
+function getCurrentPersona() {
+    const avatar = user_avatar;
+    if (!avatar) return null;
+
+    // 이름: power_user.personas[avatar] || name1 (현재 페르소나 이름)
+    const name = power_user?.personas?.[avatar] || name1 || '';
+
+    // 설명: power_user.persona_descriptions[avatar].description
+    // 또는 textarea에서 직접 읽기 (페르소나 설명창이 열려있을 때 더 정확)
+    let description = '';
+    const descObj = power_user?.persona_descriptions?.[avatar];
+    if (descObj && typeof descObj === 'object') {
+        description = descObj.description || '';
+    } else if (typeof descObj === 'string') {
+        description = descObj;
+    }
+
+    // textarea가 떠있다면 거기서도 한번 더 — 사용자가 편집 중인 최신 내용 우선
+    const textarea = document.getElementById('persona_description');
+    if (textarea && textarea.value && document.body.contains(textarea)) {
+        description = textarea.value;
+    }
+
+    return { avatar, name, description };
+}
+
+/**
  * 연결 프로필 목록 가져오기 (Connection Manager에서)
  */
 function getConnectionProfiles() {
@@ -77,7 +110,9 @@ function getConnectionProfiles() {
  * 번역 프롬프트 생성
  */
 function buildTranslationPrompt(fieldLabel, sourceText) {
-    return `You are a professional translator. Translate the following character card field into natural, fluent Korean.
+    return `You are a professional translator. Translate the following text into natural, fluent Korean.
+
+Context: This is a "${fieldLabel}" field from a SillyTavern roleplay character or persona definition.
 
 Rules:
 - Preserve all formatting, line breaks, and special tokens like {{char}}, {{user}}, <tags>, brackets, asterisks for emphasis, etc.
@@ -85,8 +120,6 @@ Rules:
 - Output ONLY the translated text, nothing else.
 - Keep proper nouns (names of people, places) in their original form unless they have a standard Korean equivalent.
 - Maintain the original tone (formal, casual, narrative, etc.).
-
-Field: ${fieldLabel}
 
 ---SOURCE---
 ${sourceText}
@@ -227,6 +260,205 @@ function updateLoadingMessage(msg) {
     const indicator = document.querySelector('#peek_translation_panel .peek-loading-indicator');
     if (indicator) indicator.textContent = msg;
 }
+
+/* ========== 페르소나 번역 ========== */
+
+/**
+ * 페르소나 번역 실행
+ */
+async function runPersonaTranslation() {
+    const settings = loadSettings();
+    const persona = getCurrentPersona();
+
+    if (!persona || !persona.avatar) {
+        toastr.warning('페르소나가 선택되지 않았어', EXT_NAME);
+        return;
+    }
+    if (!persona.description || persona.description.trim().length === 0) {
+        toastr.info('번역할 페르소나 설명이 비어있어', EXT_NAME);
+        return;
+    }
+    if (!settings.profileId) {
+        toastr.warning('Extensions → Peek 에서 연결 프로필 먼저 골라줘', EXT_NAME);
+        return;
+    }
+
+    const profiles = getConnectionProfiles();
+    const profile = profiles.find(p => p.id === settings.profileId);
+    const profileName = profile?.name || '(알 수 없는 프로필)';
+
+    const confirmed = await Popup.show.confirm(
+        '페르소나 번역 확인',
+        `<div style="text-align:left;">
+            <p><b>${escapeHtml(persona.name)}</b>의 페르소나 설명을 <b>${escapeHtml(profileName)}</b>으로 번역할까?</p>
+            <p style="font-size:0.85em;opacity:0.7;">기존 번역이 있으면 덮어쓸거야.</p>
+        </div>`
+    );
+    if (!confirmed) return;
+
+    const panel = document.getElementById('peek_persona_panel');
+    if (panel) panel.classList.add('peek-loading');
+
+    try {
+        const translated = await translateWithProfile(
+            settings.profileId,
+            'Persona Description',
+            persona.description
+        );
+        settings.personaTranslations[persona.avatar] = {
+            text: translated,
+            translatedAt: Date.now(),
+        };
+        saveSettingsDebounced();
+        toastr.success('페르소나 번역 완료!', EXT_NAME);
+    } catch (err) {
+        console.error('[Peek] 페르소나 번역 실패:', err);
+        toastr.error(`번역 실패: ${err.message}`, EXT_NAME);
+    } finally {
+        if (panel) panel.classList.remove('peek-loading');
+        renderPersonaPanel();
+    }
+}
+
+/**
+ * 페르소나 번역 표시 패널 렌더링
+ */
+function renderPersonaPanel() {
+    const settings = loadSettings();
+    const persona = getCurrentPersona();
+
+    let panel = document.getElementById('peek_persona_panel');
+
+    // 페르소나 컨트롤 영역이 안 보이면 (페르소나 탭이 닫혀있으면) 패널도 의미 없음
+    const personaControls = document.getElementById('persona_controls');
+    if (!personaControls || !persona) {
+        if (panel) panel.style.display = 'none';
+        return;
+    }
+
+    if (!panel) {
+        panel = createPersonaPanelElement();
+        // persona_controls 바로 다음에 삽입
+        if (personaControls.nextSibling) {
+            personaControls.parentNode.insertBefore(panel, personaControls.nextSibling);
+        } else {
+            personaControls.parentNode.appendChild(panel);
+        }
+    }
+
+    panel.style.display = '';
+
+    const tr = settings.personaTranslations[persona.avatar];
+    const hasTranslation = tr && tr.text;
+
+    // 접힘 상태
+    if (settings.personaPanelCollapsed) {
+        panel.classList.add('peek-collapsed');
+    } else {
+        panel.classList.remove('peek-collapsed');
+    }
+
+    const titleMeta = panel.querySelector('.peek-title-meta');
+    if (titleMeta) {
+        titleMeta.textContent = hasTranslation ? '(번역됨)' : '';
+    }
+
+    const body = panel.querySelector('.peek-panel-body');
+    if (!body) return;
+
+    if (!hasTranslation) {
+        body.innerHTML = `<div class="peek-empty">아직 번역된 게 없어.<br>👀 버튼을 눌러서 번역해봐</div>`;
+    } else {
+        body.innerHTML = `<div class="peek-field-content">${escapeHtml(tr.text)}</div>`;
+    }
+
+    const footerTime = panel.querySelector('.peek-footer-time');
+    if (footerTime) {
+        footerTime.textContent = hasTranslation
+            ? `마지막 번역: ${new Date(tr.translatedAt).toLocaleString()}`
+            : '';
+    }
+}
+
+/**
+ * 페르소나 패널 DOM 요소 생성
+ */
+function createPersonaPanelElement() {
+    const panel = document.createElement('div');
+    panel.id = 'peek_persona_panel';
+    panel.className = 'peek-translation-panel';
+    panel.innerHTML = `
+        <div class="peek-panel-header">
+            <div class="peek-title">
+                <span>👀 Peek · 페르소나</span>
+                <span class="peek-title-meta"></span>
+            </div>
+            <span class="peek-toggle-icon">▼</span>
+        </div>
+        <div class="peek-panel-body"></div>
+        <div class="peek-loading-indicator">번역 중...</div>
+        <div class="peek-panel-footer">
+            <span class="peek-footer-time"></span>
+            <div class="peek-footer-actions">
+                <span class="peek-footer-btn" data-action="clear-persona" title="이 페르소나 번역 삭제">🗑 지우기</span>
+            </div>
+        </div>
+    `;
+
+    panel.querySelector('.peek-panel-header').addEventListener('click', () => {
+        const settings = loadSettings();
+        settings.personaPanelCollapsed = !settings.personaPanelCollapsed;
+        saveSettingsDebounced();
+        renderPersonaPanel();
+    });
+
+    panel.querySelector('[data-action="clear-persona"]').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const persona = getCurrentPersona();
+        if (!persona) return;
+        const confirmed = await Popup.show.confirm('삭제 확인', '이 페르소나의 번역을 지울까?');
+        if (!confirmed) return;
+        const settings = loadSettings();
+        delete settings.personaTranslations[persona.avatar];
+        saveSettingsDebounced();
+        renderPersonaPanel();
+        toastr.info('번역 삭제됨', EXT_NAME);
+    });
+
+    return panel;
+}
+
+/**
+ * 페르소나 컨트롤 버튼 영역에 👀 번역 버튼 inject
+ */
+function injectPersonaQuickButton() {
+    const buttonsBlock = document.querySelector('#persona_controls .persona_controls_buttons_block');
+    if (!buttonsBlock) return;
+
+    // 이미 있으면 스킵
+    if (buttonsBlock.querySelector('#peek_persona_quick_btn')) return;
+
+    const btn = document.createElement('div');
+    btn.id = 'peek_persona_quick_btn';
+    btn.className = 'menu_button interactable peek-persona-btn';
+    btn.title = 'Peek: 페르소나 설명 번역';
+    btn.setAttribute('tabindex', '0');
+    btn.setAttribute('role', 'button');
+    btn.textContent = '👀';
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runPersonaTranslation().catch(err => {
+            console.error('[Peek] 페르소나 번역 에러:', err);
+            toastr.error(err.message || '알 수 없는 에러', EXT_NAME);
+        });
+    });
+
+    // 마지막에 추가 (delete 버튼 뒤)
+    buttonsBlock.appendChild(btn);
+}
+
+/* ========== 캐릭터 카드 ========== */
 
 /**
  * 캐릭터 카드 아래에 표시되는 번역 패널 렌더링
@@ -464,19 +696,13 @@ function renderSettingsPanel() {
                 </div>
                 <div class="inline-drawer-content">
                     <div class="peek-settings-block">
-                        <small style="opacity:0.75;">캐릭터 카드를 한국어로 번역해서 카드 아래에 보여줘. 실제 카드 데이터는 안 건드림.</small>
+                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>👀 아이콘이 캐릭터 설명 옆 / 페르소나 컨트롤에 추가됨 — 그걸 눌러서 번역 실행.</small>
 
                         <label for="peek_profile_select"><b>연결 프로필</b></label>
                         <select id="peek_profile_select">${profileOptions}</select>
 
-                        <label><b>번역할 필드</b></label>
+                        <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
-
-                        <div style="display:flex; gap:6px; margin-top:8px;">
-                            <button id="peek_translate_btn" class="menu_button" style="flex:1;">
-                                <i class="fa-solid fa-language"></i> 번역하기
-                            </button>
-                        </div>
 
                         <div class="peek-status" id="peek_status"></div>
                     </div>
@@ -533,16 +759,6 @@ function bindSettingsEvents() {
             saveSettingsDebounced();
         });
     });
-
-    const btn = document.getElementById('peek_translate_btn');
-    if (btn) {
-        btn.addEventListener('click', () => {
-            runTranslation().catch(err => {
-                console.error('[Peek] 번역 에러:', err);
-                toastr.error(err.message || '알 수 없는 에러', EXT_NAME);
-            });
-        });
-    }
 }
 
 /**
@@ -572,6 +788,7 @@ function updateStatus() {
  */
 function onCharacterContextChange() {
     renderTranslationPanel();
+    renderPersonaPanel();
     updateStatus();
 }
 
@@ -585,6 +802,7 @@ jQuery(async () => {
     setTimeout(() => {
         renderSettingsPanel();
         renderTranslationPanel();
+        renderPersonaPanel();
     }, 200);
 
     // 캐릭터 관련 이벤트들 바인딩
@@ -593,27 +811,38 @@ jQuery(async () => {
     eventSource.on(event_types.CHARACTER_PAGE_LOADED, onCharacterContextChange);
 
     // 캐릭터 편집 패널이 열리거나 캐릭터가 바뀔 때 단축 버튼/패널 상태 보장
-    // (description_div가 SillyTavern에 의해 재생성될 수 있어서 위임 이벤트로 감시)
     document.addEventListener('click', (e) => {
-        // 캐릭터 카드 클릭하면 form이 갱신될 수 있음 → 살짝 후에 패널 재렌더
+        // 캐릭터 카드 클릭하면 form이 갱신될 수 있음
         const charBlock = e.target.closest('#rm_print_characters_block .character_select, #rm_button_back');
         if (charBlock) {
             setTimeout(() => renderTranslationPanel(), 100);
         }
+        // 페르소나 관련 버튼 클릭 → 페르소나가 바뀌었을 수 있음
+        const personaTrigger = e.target.closest('#persona-management-button, .persona-list-item, #persona_controls');
+        if (personaTrigger) {
+            setTimeout(() => renderPersonaPanel(), 150);
+        }
     }, true);
 
-    // 안전망: description_div가 등장/변경될 때 단축 버튼 자동 inject
-    const descObserver = new MutationObserver(() => {
+    // 안전망: 관련 DOM이 등장/변경될 때 단축 버튼 자동 inject
+    const domObserver = new MutationObserver(() => {
+        // 캐릭터 설명 라벨 옆 👀
         const descDiv = document.getElementById('description_div');
         if (descDiv && !descDiv.querySelector('#peek_quick_btn') && this_chid !== undefined) {
             injectQuickButton();
         }
+        // 페르소나 컨트롤 영역 👀
+        const personaButtons = document.querySelector('#persona_controls .persona_controls_buttons_block');
+        if (personaButtons && !personaButtons.querySelector('#peek_persona_quick_btn')) {
+            injectPersonaQuickButton();
+            // 버튼이 새로 들어갔으면 패널도 같이 챙기기
+            renderPersonaPanel();
+        }
     });
-    descObserver.observe(document.body, { childList: true, subtree: true });
+    domObserver.observe(document.body, { childList: true, subtree: true });
 
     // Connection Manager 프로필 변경됐을 때 셀렉트박스 새로고침
     eventSource.on(event_types.SETTINGS_UPDATED, () => {
-        // 프로필 셀렉트만 업데이트 (전체 다시 그리면 체크박스 상태 날아감)
         const select = document.getElementById('peek_profile_select');
         if (!select) return;
         const settings = loadSettings();
