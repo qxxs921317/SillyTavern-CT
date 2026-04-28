@@ -29,6 +29,7 @@ const defaultSettings = {
     personaTranslations: {},  // 페르소나: { [personaAvatar]: { text, translatedAt } }
     panelCollapsed: false,
     personaPanelCollapsed: false,
+    maxResponseTokens: 8192,  // 응답 토큰 한도 (긴 카드 + 한국어 번역 충분히 수용)
 };
 
 /**
@@ -130,7 +131,9 @@ Korean translation:`;
 
 /**
  * 연결 프로필로 번역 요청
- * ConnectionManagerRequestService는 getContext()를 통해 접근
+ * ConnectionManagerRequestService는 getContext()를 통해 접근.
+ * Vertex AI 호환을 위해 extractData: false 로 raw 응답을 받아 직접 파싱하고,
+ * 빈 응답 시 1회 자동 재시도.
  */
 async function translateWithProfile(profileId, fieldLabel, sourceText) {
     const ctx = getContext();
@@ -142,15 +145,96 @@ async function translateWithProfile(profileId, fieldLabel, sourceText) {
     }
 
     const prompt = buildTranslationPrompt(fieldLabel, sourceText);
-    const result = await service.sendRequest(
-        profileId,
-        prompt,
-        2048,  // max response tokens (긴 카드 대응)
-    );
-    if (!result || !result.content) {
-        throw new Error('빈 응답을 받았어');
+    const maxTokens = extension_settings[EXT_ID]?.maxResponseTokens || 8192;
+
+    // 1차 시도 + 빈 응답 시 1회 재시도
+    let lastRaw = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+            // extractData: false → raw 응답 객체 반환 (OpenAI 호환 구조)
+            const result = await service.sendRequest(
+                profileId,
+                prompt,
+                maxTokens,
+                { extractData: false }
+            );
+            lastRaw = result;
+
+            const text = extractTextFromResponse(result);
+            if (text && text.trim().length > 0) {
+                return text.trim();
+            }
+
+            console.warn(`[Peek] ${fieldLabel} 응답 비어있음 (시도 ${attempt}/2). raw:`, result);
+        } catch (err) {
+            // sendRequest가 throw한 경우 — extractData 옵션 미지원 옛 버전일 수도 있어서 폴백
+            if (attempt === 1) {
+                console.warn(`[Peek] extractData 옵션 사용 실패, 기본 모드로 폴백:`, err);
+                try {
+                    const result = await service.sendRequest(profileId, prompt, maxTokens);
+                    lastRaw = result;
+                    if (result && result.content && result.content.trim()) {
+                        return result.content.trim();
+                    }
+                } catch (err2) {
+                    console.error(`[Peek] 폴백 호출도 실패:`, err2);
+                    if (attempt === 2) throw err2;
+                }
+            } else {
+                throw err;
+            }
+        }
     }
-    return result.content.trim();
+
+    // 2회 다 빈 응답
+    console.error('[Peek] 번역 실패 - 최종 raw 응답:', lastRaw);
+    throw new Error('응답이 비어있어 (Vertex AI safety filter나 모델 거부일 가능성. 콘솔에 raw 응답 출력됨)');
+}
+
+/**
+ * sendRequest의 raw 응답에서 텍스트 추출.
+ * Vertex/OpenAI/Claude/Gemini 등 다양한 응답 구조 대응.
+ */
+function extractTextFromResponse(result) {
+    if (!result) return '';
+
+    // 1) 단순 content 필드 (extractData: true 모드의 결과)
+    if (typeof result.content === 'string') return result.content;
+
+    // 2) OpenAI 호환 (Vertex AI Full mode 응답이 이 형태)
+    if (Array.isArray(result.choices) && result.choices.length > 0) {
+        const choice = result.choices[0];
+        if (choice?.message?.content) return choice.message.content;
+        if (typeof choice?.text === 'string') return choice.text;
+        // 빈 candidate 감지 (Vertex가 종종 이렇게 옴)
+        if (choice?.finish_reason && !choice?.message?.content) {
+            console.warn('[Peek] Vertex가 finish_reason은 줬지만 content가 빔. finish_reason:', choice.finish_reason);
+        }
+    }
+
+    // 3) Gemini native 응답 (candidates 배열)
+    if (Array.isArray(result.candidates) && result.candidates.length > 0) {
+        const cand = result.candidates[0];
+        const parts = cand?.content?.parts;
+        if (Array.isArray(parts)) {
+            const text = parts.map(p => p?.text || '').join('');
+            if (text) return text;
+        }
+    }
+
+    // 4) Anthropic Claude 네이티브
+    if (Array.isArray(result.content)) {
+        const text = result.content
+            .filter(b => b?.type === 'text')
+            .map(b => b.text || '')
+            .join('');
+        if (text) return text;
+    }
+
+    // 5) 최후의 수단 — text 필드
+    if (typeof result.text === 'string') return result.text;
+
+    return '';
 }
 
 /**
@@ -701,6 +785,9 @@ function renderSettingsPanel() {
                         <label for="peek_profile_select"><b>연결 프로필</b></label>
                         <select id="peek_profile_select">${profileOptions}</select>
 
+                        <label for="peek_max_tokens"><b>응답 토큰 최대</b> <small style="opacity:0.6;">(기본 8192, 모델에 맞춰 조정)</small></label>
+                        <input type="number" id="peek_max_tokens" min="512" max="65536" step="256" class="text_pole" value="${settings.maxResponseTokens || 8192}">
+
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
 
@@ -759,6 +846,20 @@ function bindSettingsEvents() {
             saveSettingsDebounced();
         });
     });
+
+    const tokensInput = document.getElementById('peek_max_tokens');
+    if (tokensInput) {
+        tokensInput.addEventListener('change', (e) => {
+            const settings = loadSettings();
+            const val = parseInt(e.target.value, 10);
+            if (!isNaN(val) && val >= 512 && val <= 65536) {
+                settings.maxResponseTokens = val;
+                saveSettingsDebounced();
+            } else {
+                e.target.value = settings.maxResponseTokens || 8192;
+            }
+        });
+    }
 }
 
 /**
