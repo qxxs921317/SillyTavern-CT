@@ -1,0 +1,169 @@
+/* === Peek 👀 Extension Styles === */
+
+/* --- 확장 설정 패널 (Extensions 탭 안) --- */
+#peek_settings .peek-settings-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 8px 0;
+}
+
+#peek_settings .peek-fields-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 4px 12px;
+    margin: 4px 0;
+}
+
+#peek_settings .peek-field-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.9em;
+}
+
+#peek_settings .peek-field-checkbox input[type="checkbox"] {
+    margin: 0;
+    cursor: pointer;
+}
+
+#peek_settings select {
+    width: 100%;
+}
+
+#peek_settings .peek-status {
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin-top: 4px;
+    min-height: 1.2em;
+}
+
+/* --- 캐릭터 카드 아래 번역 표시 영역 --- */
+#peek_translation_panel {
+    margin: 10px 0;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    background: var(--SmartThemeBlurTintColor);
+    overflow: hidden;
+}
+
+#peek_translation_panel .peek-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    background: var(--black30a);
+    cursor: pointer;
+    user-select: none;
+    font-weight: 600;
+}
+
+#peek_translation_panel .peek-panel-header .peek-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#peek_translation_panel .peek-panel-header .peek-title-meta {
+    font-size: 0.8em;
+    opacity: 0.6;
+    font-weight: normal;
+}
+
+#peek_translation_panel .peek-panel-header .peek-toggle-icon {
+    transition: transform 0.2s ease;
+}
+
+#peek_translation_panel.peek-collapsed .peek-toggle-icon {
+    transform: rotate(-90deg);
+}
+
+#peek_translation_panel .peek-panel-body {
+    padding: 12px;
+    max-height: 600px;
+    overflow-y: auto;
+}
+
+#peek_translation_panel.peek-collapsed .peek-panel-body {
+    display: none;
+}
+
+#peek_translation_panel .peek-empty {
+    text-align: center;
+    opacity: 0.5;
+    padding: 20px;
+    font-size: 0.9em;
+}
+
+#peek_translation_panel .peek-field-block {
+    margin-bottom: 14px;
+}
+
+#peek_translation_panel .peek-field-block:last-child {
+    margin-bottom: 0;
+}
+
+#peek_translation_panel .peek-field-label {
+    font-size: 0.75em;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    opacity: 0.6;
+    margin-bottom: 4px;
+    font-weight: 600;
+}
+
+#peek_translation_panel .peek-field-content {
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    line-height: 1.5;
+    padding: 8px 10px;
+    background: var(--black30a);
+    border-radius: 4px;
+    font-size: 0.95em;
+}
+
+#peek_translation_panel .peek-panel-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 12px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    font-size: 0.8em;
+    opacity: 0.7;
+}
+
+#peek_translation_panel .peek-panel-footer .peek-footer-actions {
+    display: flex;
+    gap: 8px;
+}
+
+#peek_translation_panel .peek-panel-footer .peek-footer-btn {
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 3px;
+    transition: background 0.15s;
+}
+
+#peek_translation_panel .peek-panel-footer .peek-footer-btn:hover {
+    background: var(--white30a);
+}
+
+/* --- 로딩 상태 --- */
+#peek_translation_panel.peek-loading .peek-panel-body {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+#peek_translation_panel .peek-loading-indicator {
+    display: none;
+    text-align: center;
+    padding: 20px;
+    font-style: italic;
+    opacity: 0.7;
+}
+
+#peek_translation_panel.peek-loading .peek-loading-indicator {
+    display: block;
+}
