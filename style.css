@@ -47,6 +47,31 @@
     border-radius: 8px;
     background: var(--SmartThemeBlurTintColor);
     overflow: hidden;
+    /* form_create 등 flex 컨테이너 내부에서도 콘텐츠 길이 그대로 유지 */
+    flex: none;
+    flex-shrink: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* --- 캐릭터 설명 라벨 옆 단축 번역 버튼 (👀) --- */
+.peek-quick-btn {
+    cursor: pointer;
+    user-select: none;
+    font-style: normal;
+    line-height: 1;
+    padding: 0 4px;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+    opacity: 0.85;
+}
+
+.peek-quick-btn:hover {
+    transform: scale(1.15);
+    opacity: 1;
+}
+
+.peek-quick-btn:active {
+    transform: scale(0.95);
 }
 
 #peek_translation_panel .peek-panel-header {
@@ -82,8 +107,7 @@
 
 #peek_translation_panel .peek-panel-body {
     padding: 12px;
-    max-height: 600px;
-    overflow-y: auto;
+    /* 자체 스크롤/높이 제한 없음 — 콘텐츠대로 자연스럽게 늘어남 */
 }
 
 #peek_translation_panel.peek-collapsed .peek-panel-body {

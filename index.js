@@ -250,6 +250,9 @@ function renderTranslationPanel() {
         injectPanel(panel);
     }
 
+    // 단축 버튼은 항상 체크 (DOM 재생성됐을 수 있음)
+    injectQuickButton();
+
     panel.style.display = '';
 
     const charTranslations = settings.translations[charKey] || {};
@@ -357,18 +360,61 @@ function createPanelElement() {
  * SillyTavern의 캐릭터 편집 패널 구조에 맞춰 적절한 위치 찾기
  */
 function injectPanel(panel) {
-    // 캐릭터 편집 폼 끝 부분에 붙이기
-    // #form_create 안의 마지막에 넣으면 카드 아래쪽에 자연스럽게 위치
-    const target = document.getElementById('form_create')
-        || document.getElementById('rm_ch_create_block');
+    // form_create 바깥에 붙여야 flex 압박/스크롤 영역 제약에서 자유로움.
+    // rm_ch_create_block은 form_create의 부모(캐릭터 편집 패널 전체 컨테이너)
+    const outerContainer = document.getElementById('rm_ch_create_block');
+    const form = document.getElementById('form_create');
 
-    if (target) {
-        target.appendChild(panel);
+    if (outerContainer && form) {
+        // form 바로 다음 형제로 삽입 (form 끝 = 카드 끝)
+        if (form.nextSibling) {
+            outerContainer.insertBefore(panel, form.nextSibling);
+        } else {
+            outerContainer.appendChild(panel);
+        }
+    } else if (outerContainer) {
+        outerContainer.appendChild(panel);
+    } else if (form) {
+        // 폴백: 그래도 form 안쪽 끝
+        form.appendChild(panel);
     } else {
-        // 폴백: body에라도 (안전망)
         document.body.appendChild(panel);
-        console.warn('[Peek] 캐릭터 편집 폼을 못 찾아서 body에 붙였어');
+        console.warn('[Peek] 캐릭터 편집 컨테이너를 못 찾아서 body에 붙였어');
     }
+}
+
+/**
+ * 캐릭터 설명 라벨 옆에 👀 단축 번역 버튼 inject
+ */
+function injectQuickButton() {
+    const descDiv = document.getElementById('description_div');
+    if (!descDiv) return;
+
+    // 이미 있으면 스킵
+    if (descDiv.querySelector('#peek_quick_btn')) return;
+
+    // editor_maximize 아이콘 옆에 끼워넣기
+    const maximizeIcon = descDiv.querySelector('.editor_maximize');
+    if (!maximizeIcon) return;
+
+    const btn = document.createElement('i');
+    btn.id = 'peek_quick_btn';
+    btn.className = 'right_menu_button interactable peek-quick-btn';
+    btn.title = 'Peek: 이 캐릭터 카드를 한국어로 번역';
+    btn.setAttribute('tabindex', '0');
+    btn.setAttribute('role', 'button');
+    btn.textContent = '👀';
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        runTranslation().catch(err => {
+            console.error('[Peek] 번역 에러:', err);
+            toastr.error(err.message || '알 수 없는 에러', EXT_NAME);
+        });
+    });
+
+    // editor_maximize 바로 뒤에 삽입
+    maximizeIcon.parentNode.insertBefore(btn, maximizeIcon.nextSibling);
 }
 
 /**
@@ -545,6 +591,25 @@ jQuery(async () => {
     eventSource.on(event_types.CHAT_CHANGED, onCharacterContextChange);
     eventSource.on(event_types.CHARACTER_EDITED, onCharacterContextChange);
     eventSource.on(event_types.CHARACTER_PAGE_LOADED, onCharacterContextChange);
+
+    // 캐릭터 편집 패널이 열리거나 캐릭터가 바뀔 때 단축 버튼/패널 상태 보장
+    // (description_div가 SillyTavern에 의해 재생성될 수 있어서 위임 이벤트로 감시)
+    document.addEventListener('click', (e) => {
+        // 캐릭터 카드 클릭하면 form이 갱신될 수 있음 → 살짝 후에 패널 재렌더
+        const charBlock = e.target.closest('#rm_print_characters_block .character_select, #rm_button_back');
+        if (charBlock) {
+            setTimeout(() => renderTranslationPanel(), 100);
+        }
+    }, true);
+
+    // 안전망: description_div가 등장/변경될 때 단축 버튼 자동 inject
+    const descObserver = new MutationObserver(() => {
+        const descDiv = document.getElementById('description_div');
+        if (descDiv && !descDiv.querySelector('#peek_quick_btn') && this_chid !== undefined) {
+            injectQuickButton();
+        }
+    });
+    descObserver.observe(document.body, { childList: true, subtree: true });
 
     // Connection Manager 프로필 변경됐을 때 셀렉트박스 새로고침
     eventSource.on(event_types.SETTINGS_UPDATED, () => {
