@@ -592,7 +592,7 @@ function renderTranslationPanel() {
     if (!body) return;
 
     if (!hasAny) {
-        body.innerHTML = `<div class="peek-empty">아직 번역된 게 없어.<br>확장 탭에서 "번역하기" 눌러봐 👀</div>`;
+        body.innerHTML = `<div class="peek-empty">아직 번역된 게 없어.<br>캐릭터 설명 옆 👀 버튼을 눌러서 번역해봐</div>`;
         return;
     }
 

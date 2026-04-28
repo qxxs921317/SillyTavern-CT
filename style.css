@@ -100,7 +100,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 8px 12px;
-    background: var(--black30a);
+    background: var(--white20a);
     cursor: pointer;
     user-select: none;
     font-weight: 600;
@@ -171,9 +171,10 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.5;
-    padding: 8px 10px;
-    background: var(--black30a);
-    border-radius: 4px;
+    padding: 8px 12px;
+    background: transparent;
+    border-left: 3px solid var(--SmartThemeQuoteColor, var(--white30a));
+    border-radius: 0 4px 4px 0;
     font-size: 0.95em;
 }
 
