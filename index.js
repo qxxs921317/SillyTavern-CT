@@ -25,19 +25,11 @@ const TRANSLATABLE_FIELDS = [
 const defaultSettings = {
     profileId: '',
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
-    translations: {},  // 자동 번역(캐릭터): { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
-    personaTranslations: {},  // 자동 번역(페르소나): { [personaAvatar]: { text, translatedAt } }
-    manualTranslations: {},  // 수동 번역(캐릭터): { [avatarKey]: { text, updatedAt } }
-    personaManualTranslations: {},  // 수동 번역(페르소나): { [personaAvatar]: { text, updatedAt } }
-    notes: {},  // 메모(캐릭터): { [avatarKey]: { text, updatedAt } }
-    personaNotes: {},  // 메모(페르소나): { [personaAvatar]: { text, updatedAt } }
+    translations: {},  // 캐릭터: { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
+    personaTranslations: {},  // 페르소나: { [personaAvatar]: { text, translatedAt } }
     panelCollapsed: false,
     personaPanelCollapsed: false,
-    manualPanelCollapsed: true,  // 수동 번역은 안 쓸 사람 많을테니 기본 접힘
-    notesPanelCollapsed: true,    // 메모도 기본 접힘
-    personaManualPanelCollapsed: true,
-    personaNotesPanelCollapsed: true,
-    maxResponseTokens: 8192,
+    maxResponseTokens: 8192,  // 응답 토큰 한도 (긴 카드 + 한국어 번역 충분히 수용)
 };
 
 /**
@@ -353,97 +345,6 @@ function updateLoadingMessage(msg) {
     if (indicator) indicator.textContent = msg;
 }
 
-/* ========== 공통: 수동번역/메모 작은 패널 ========== */
-
-/**
- * Debounced 저장 트리거 (textarea 입력시마다 saveSettingsDebounced 호출되어도 안전하지만 추가 방어)
- */
-let _peekSaveTimer = null;
-function schedulePeekSave() {
-    if (_peekSaveTimer) clearTimeout(_peekSaveTimer);
-    _peekSaveTimer = setTimeout(() => {
-        saveSettingsDebounced();
-        _peekSaveTimer = null;
-    }, 300);
-}
-
-/**
- * 작은 textarea 패널 생성 (수동번역 또는 메모용).
- * @param {object} opts
- * @param {string} opts.id - 패널 DOM id
- * @param {string} opts.titleText - 헤더에 표시될 제목 (예: '✏ 수동 번역')
- * @param {string} opts.placeholder - textarea placeholder
- * @param {string} opts.collapsedKey - extension_settings에서 접힘 상태 저장할 키
- * @param {function(string): void} opts.onChange - textarea 값 변경 시 호출 (debounced)
- * @returns {HTMLElement}
- */
-function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onChange }) {
-    const panel = document.createElement('div');
-    panel.id = id;
-    panel.className = 'peek-small-panel';
-    panel.innerHTML = `
-        <div class="peek-small-header">
-            <span class="peek-small-title">${titleText}</span>
-            <span class="peek-small-meta"></span>
-            <span class="peek-toggle-icon">▼</span>
-        </div>
-        <div class="peek-small-body">
-            <textarea class="peek-small-textarea" placeholder="${escapeHtml(placeholder)}" rows="3"></textarea>
-        </div>
-    `;
-
-    const header = panel.querySelector('.peek-small-header');
-    const textarea = panel.querySelector('.peek-small-textarea');
-
-    // 접기/펼치기
-    header.addEventListener('click', () => {
-        const settings = loadSettings();
-        settings[collapsedKey] = !settings[collapsedKey];
-        saveSettingsDebounced();
-        applyCollapsedState(panel, settings[collapsedKey]);
-    });
-
-    // 입력 시 자동 저장 (debounced)
-    textarea.addEventListener('input', () => {
-        onChange(textarea.value);
-        schedulePeekSave();
-    });
-
-    return panel;
-}
-
-/**
- * 패널의 접힘 상태 적용
- */
-function applyCollapsedState(panel, isCollapsed) {
-    if (isCollapsed) panel.classList.add('peek-collapsed');
-    else panel.classList.remove('peek-collapsed');
-}
-
-/**
- * 작은 패널의 textarea/메타 업데이트
- */
-function updateSmallPanel(panel, value, updatedAt, isCollapsed) {
-    if (!panel) return;
-    const textarea = panel.querySelector('.peek-small-textarea');
-    const meta = panel.querySelector('.peek-small-meta');
-
-    // 사용자가 지금 편집 중이면 덮어쓰지 않기 (포커스 유지)
-    if (textarea && document.activeElement !== textarea) {
-        textarea.value = value || '';
-    }
-
-    if (meta) {
-        if (value && updatedAt) {
-            meta.textContent = `· ${new Date(updatedAt).toLocaleString()}`;
-        } else {
-            meta.textContent = '';
-        }
-    }
-
-    applyCollapsedState(panel, isCollapsed);
-}
-
 /* ========== 페르소나 번역 ========== */
 
 /**
@@ -561,74 +462,6 @@ function renderPersonaPanel() {
             ? `마지막 번역: ${new Date(tr.translatedAt).toLocaleString()}`
             : '';
     }
-
-    // 페르소나 수동번역/메모 패널도 같이 렌더
-    renderPersonaExtraPanels(panel, persona.avatar);
-}
-
-/**
- * 페르소나 패널 아래에 수동번역/메모 패널 렌더링
- */
-function renderPersonaExtraPanels(translationPanel, personaAvatar) {
-    const settings = loadSettings();
-
-    let manualPanel = document.getElementById('peek_persona_manual_panel');
-    if (!manualPanel) {
-        manualPanel = createSmallTextPanel({
-            id: 'peek_persona_manual_panel',
-            titleText: '✏ 수동 번역',
-            placeholder: '외부에서 번역해온 페르소나 설명을 여기 붙여넣으면 자동 저장돼.',
-            collapsedKey: 'personaManualPanelCollapsed',
-            onChange: (val) => {
-                const s = loadSettings();
-                const p = getCurrentPersona();
-                if (!p) return;
-                if (val.trim()) {
-                    s.personaManualTranslations[p.avatar] = { text: val, updatedAt: Date.now() };
-                } else {
-                    delete s.personaManualTranslations[p.avatar];
-                }
-            },
-        });
-        translationPanel.parentNode.insertBefore(manualPanel, translationPanel.nextSibling);
-    }
-
-    let notesPanel = document.getElementById('peek_persona_notes_panel');
-    if (!notesPanel) {
-        notesPanel = createSmallTextPanel({
-            id: 'peek_persona_notes_panel',
-            titleText: '📝 메모',
-            placeholder: '페르소나 변경 내역, 메모, 자유 노트 등.',
-            collapsedKey: 'personaNotesPanelCollapsed',
-            onChange: (val) => {
-                const s = loadSettings();
-                const p = getCurrentPersona();
-                if (!p) return;
-                if (val.trim()) {
-                    s.personaNotes[p.avatar] = { text: val, updatedAt: Date.now() };
-                } else {
-                    delete s.personaNotes[p.avatar];
-                }
-            },
-        });
-        manualPanel.parentNode.insertBefore(notesPanel, manualPanel.nextSibling);
-    }
-
-    const manual = settings.personaManualTranslations[personaAvatar];
-    updateSmallPanel(
-        manualPanel,
-        manual?.text || '',
-        manual?.updatedAt,
-        settings.personaManualPanelCollapsed
-    );
-
-    const note = settings.personaNotes[personaAvatar];
-    updateSmallPanel(
-        notesPanel,
-        note?.text || '',
-        note?.updatedAt,
-        settings.personaNotesPanelCollapsed
-    );
 }
 
 /**
@@ -787,77 +620,6 @@ function renderTranslationPanel() {
         const d = new Date(latest);
         footer.textContent = `마지막 번역: ${d.toLocaleString()}`;
     }
-
-    // 캐릭터의 수동 번역 / 메모 패널도 같이 렌더
-    renderCharExtraPanels(panel, charKey);
-}
-
-/**
- * 캐릭터 패널 아래에 수동번역/메모 패널 렌더링
- */
-function renderCharExtraPanels(translationPanel, charKey) {
-    const settings = loadSettings();
-
-    // 수동 번역 패널
-    let manualPanel = document.getElementById('peek_manual_panel');
-    if (!manualPanel) {
-        manualPanel = createSmallTextPanel({
-            id: 'peek_manual_panel',
-            titleText: '✏ 수동 번역',
-            placeholder: '외부에서 번역해온 내용을 여기 붙여넣으면 자동 저장돼.',
-            collapsedKey: 'manualPanelCollapsed',
-            onChange: (val) => {
-                const s = loadSettings();
-                const k = getCurrentCharKey();
-                if (!k) return;
-                if (val.trim()) {
-                    s.manualTranslations[k] = { text: val, updatedAt: Date.now() };
-                } else {
-                    delete s.manualTranslations[k];
-                }
-            },
-        });
-        translationPanel.parentNode.insertBefore(manualPanel, translationPanel.nextSibling);
-    }
-
-    // 메모 패널 (수동 번역 패널 다음에)
-    let notesPanel = document.getElementById('peek_notes_panel');
-    if (!notesPanel) {
-        notesPanel = createSmallTextPanel({
-            id: 'peek_notes_panel',
-            titleText: '📝 메모',
-            placeholder: '캐릭터 시트 변경 내역, 메모, 자유 노트 등.',
-            collapsedKey: 'notesPanelCollapsed',
-            onChange: (val) => {
-                const s = loadSettings();
-                const k = getCurrentCharKey();
-                if (!k) return;
-                if (val.trim()) {
-                    s.notes[k] = { text: val, updatedAt: Date.now() };
-                } else {
-                    delete s.notes[k];
-                }
-            },
-        });
-        manualPanel.parentNode.insertBefore(notesPanel, manualPanel.nextSibling);
-    }
-
-    // 데이터 동기화
-    const manual = settings.manualTranslations[charKey];
-    updateSmallPanel(
-        manualPanel,
-        manual?.text || '',
-        manual?.updatedAt,
-        settings.manualPanelCollapsed
-    );
-
-    const note = settings.notes[charKey];
-    updateSmallPanel(
-        notesPanel,
-        note?.text || '',
-        note?.updatedAt,
-        settings.notesPanelCollapsed
-    );
 }
 
 /**
@@ -1018,7 +780,7 @@ function renderSettingsPanel() {
                 </div>
                 <div class="inline-drawer-content">
                     <div class="peek-settings-block">
-                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>👀 자동 번역 · ✏ 수동 번역(붙여넣기) · 📝 자유 메모 — 모두 캐릭터/페르소나별로 자동 저장됨.</small>
+                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>👀 아이콘이 캐릭터 설명 옆 / 페르소나 컨트롤에 추가됨 — 그걸 눌러서 번역 실행.</small>
 
                         <label for="peek_profile_select"><b>연결 프로필</b></label>
                         <select id="peek_profile_select">${profileOptions}</select>
@@ -1028,14 +790,6 @@ function renderSettingsPanel() {
 
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
-
-                        <hr style="border:none;border-top:1px solid var(--SmartThemeBorderColor);margin:8px 0 4px;">
-                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                            <small style="opacity:0.7;">저장된 모든 번역/메모 데이터를 한 번에 삭제</small>
-                            <button id="peek_clear_all_btn" class="menu_button" style="white-space:nowrap;">
-                                🗑 전체 삭제
-                            </button>
-                        </div>
 
                         <div class="peek-status" id="peek_status"></div>
                     </div>
@@ -1104,56 +858,6 @@ function bindSettingsEvents() {
             } else {
                 e.target.value = settings.maxResponseTokens || 8192;
             }
-        });
-    }
-
-    const clearBtn = document.getElementById('peek_clear_all_btn');
-    if (clearBtn) {
-        clearBtn.addEventListener('click', async () => {
-            const settings = loadSettings();
-            const charCount = Object.keys(settings.translations || {}).length;
-            const personaCount = Object.keys(settings.personaTranslations || {}).length;
-            const manualCount = Object.keys(settings.manualTranslations || {}).length;
-            const personaManualCount = Object.keys(settings.personaManualTranslations || {}).length;
-            const noteCount = Object.keys(settings.notes || {}).length;
-            const personaNoteCount = Object.keys(settings.personaNotes || {}).length;
-            const total = charCount + personaCount + manualCount + personaManualCount + noteCount + personaNoteCount;
-
-            if (total === 0) {
-                toastr.info('삭제할 데이터가 없어', EXT_NAME);
-                return;
-            }
-
-            const confirmed = await Popup.show.confirm(
-                '⚠ 전체 데이터 삭제',
-                `<div style="text-align:left;">
-                    <p>저장된 모든 데이터를 삭제할까? <b>되돌릴 수 없어.</b></p>
-                    <ul style="font-size:0.9em;opacity:0.85;">
-                        <li>캐릭터 자동 번역: ${charCount}개</li>
-                        <li>캐릭터 수동 번역: ${manualCount}개</li>
-                        <li>캐릭터 메모: ${noteCount}개</li>
-                        <li>페르소나 자동 번역: ${personaCount}개</li>
-                        <li>페르소나 수동 번역: ${personaManualCount}개</li>
-                        <li>페르소나 메모: ${personaNoteCount}개</li>
-                    </ul>
-                    <p style="font-size:0.85em;opacity:0.7;">설정(프로필, 토큰 한도, 필드 선택)은 그대로 유지돼.</p>
-                </div>`
-            );
-            if (!confirmed) return;
-
-            settings.translations = {};
-            settings.personaTranslations = {};
-            settings.manualTranslations = {};
-            settings.personaManualTranslations = {};
-            settings.notes = {};
-            settings.personaNotes = {};
-            saveSettingsDebounced();
-
-            // 패널 다시 그리기
-            renderTranslationPanel();
-            renderPersonaPanel();
-
-            toastr.success(`${total}개 데이터 삭제됨`, EXT_NAME);
         });
     }
 }
