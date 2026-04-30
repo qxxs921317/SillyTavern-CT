@@ -44,31 +44,6 @@ const defaultSettings = {
 };
 
 /**
- * 즉시 disk write를 강제하는 헬퍼.
- * saveSettingsDebounced는 일정시간 모아 저장해서 새로고침 race에 손실 위험 있음.
- * blur, 캐릭터/페르소나 전환, 페이지 종료 시점에는 이걸로 강제 저장.
- */
-async function forceSaveNow() {
-    try {
-        // 1) lodash debounce의 flush() — saveSettingsDebounced 자체가 lodash debounce면 동작
-        if (typeof saveSettingsDebounced?.flush === 'function') {
-            saveSettingsDebounced.flush();
-        }
-        // 2) getContext에서 즉시 저장 함수 — 가장 신뢰할 수 있음
-        const ctx = getContext();
-        if (ctx && typeof ctx.saveSettings === 'function') {
-            await ctx.saveSettings();
-            return;
-        }
-        // 3) 폴백: saveSettingsDebounced 호출 후 약간 대기 (debounce 만료 유도)
-        saveSettingsDebounced();
-    } catch (err) {
-        console.error('[Peek] forceSaveNow 실패, debounced로 폴백:', err);
-        try { saveSettingsDebounced(); } catch (_) {}
-    }
-}
-
-/**
  * 설정 초기화 / 로드
  */
 function loadSettings() {
@@ -385,18 +360,15 @@ function updateLoadingMessage(msg) {
 
 /**
  * 작은 textarea 패널 생성 (메모용).
- * 데이터 안전을 위해:
- * 1. 입력 즉시 메모리에 저장 (debounce 없음 — 손실 방지)
- * 2. saveSettingsDebounced는 SillyTavern이 자체 debounce 처리
- * 3. blur 시 한번 더 강제 저장
- * 4. textarea가 이미 DOM에 있고 같은 키면 절대 덮어쓰지 않음 (race 방지)
+ * - input 시 메모리에 반영 + 자동 저장 (saveSettingsDebounced)
+ * - 저장 버튼으로 명시적 저장도 가능 (dirty 플래그로 미저장 변경 표시)
  *
  * @param {object} opts
  * @param {string} opts.id - 패널 DOM id
  * @param {string} opts.titleText - 헤더에 표시될 제목
  * @param {string} opts.placeholder - textarea placeholder
  * @param {string} opts.collapsedKey - 접힘 상태 저장 키
- * @param {function(string, string): void} opts.onSave - (value, dataKey) → 즉시 저장. dataKey는 현재 캐릭터/페르소나 식별자
+ * @param {function(string, string): void} opts.onSave - (value, dataKey) → 메모리 저장
  * @param {function(): string|null} opts.getDataKey - 현재 활성 dataKey 반환
  * @returns {HTMLElement}
  */
@@ -408,6 +380,7 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
         <div class="peek-small-header">
             <span class="peek-small-title">${titleText}</span>
             <span class="peek-small-meta"></span>
+            <button class="peek-save-btn" type="button" title="저장">💾 저장</button>
             <span class="peek-toggle-icon">▼</span>
         </div>
         <div class="peek-small-body">
@@ -417,32 +390,43 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
 
     const header = panel.querySelector('.peek-small-header');
     const textarea = panel.querySelector('.peek-small-textarea');
+    const saveBtn = panel.querySelector('.peek-save-btn');
 
-    // 접기/펼치기
-    header.addEventListener('click', () => {
+    // 접기/펼치기 (저장 버튼 클릭 시는 무시)
+    header.addEventListener('click', (e) => {
+        if (e.target.closest('.peek-save-btn')) return;
         const settings = loadSettings();
         settings[collapsedKey] = !settings[collapsedKey];
         saveSettingsDebounced();
         applyCollapsedState(panel, settings[collapsedKey]);
     });
 
-    // 입력 시 메모리에 즉시 반영 + debounced disk write
+    // 입력 시: 메모리에 즉시 반영 + 자동 저장 + dirty 표시
     textarea.addEventListener('input', () => {
         const key = textarea.dataset.peekKey || getDataKey();
         if (!key) return;
         onSave(textarea.value, key);
         saveSettingsDebounced();
+        panel.classList.add('peek-dirty');
     });
 
-    // blur/change 시 즉시 disk write 강제 (새로고침 race 방지)
-    const flushSave = () => {
+    // 명시적 저장 버튼
+    saveBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
         const key = textarea.dataset.peekKey || getDataKey();
         if (!key) return;
         onSave(textarea.value, key);
-        forceSaveNow();
-    };
-    textarea.addEventListener('blur', flushSave);
-    textarea.addEventListener('change', flushSave);
+        saveSettingsDebounced();
+        panel.classList.remove('peek-dirty');
+        // 잠깐 ✓ 표시
+        const orig = saveBtn.textContent;
+        saveBtn.textContent = '✓ 저장됨';
+        saveBtn.classList.add('peek-saved-flash');
+        setTimeout(() => {
+            saveBtn.textContent = orig;
+            saveBtn.classList.remove('peek-saved-flash');
+        }, 1200);
+    });
 
     return panel;
 }
@@ -707,7 +691,11 @@ function createPersonaPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣으면 자동 저장돼."></textarea>
+                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣어. 자동 저장되지만 💾 저장 버튼으로 강제 저장도 가능."></textarea>
+                <div class="peek-manual-actions">
+                    <span class="peek-manual-status"></span>
+                    <button class="peek-save-btn peek-save-btn-large" type="button" title="저장">💾 저장</button>
+                </div>
             </div>
         </div>
         <div class="peek-loading-indicator">번역 중...</div>
@@ -740,11 +728,11 @@ function createPersonaPanelElement() {
         });
     });
 
-    // 수동 번역 textarea
+    // 수동 번역 textarea - input 시 자동 저장
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
+    const manualSaveBtn = panel.querySelector('.peek-tab-manual .peek-save-btn-large');
     if (manualTextarea) {
         const writeToMemory = () => {
-            // dataset.peekKey 우선 — 페르소나 컨텍스트 일시 변경 방어
             const persona = getCurrentPersona();
             const key = manualTextarea.dataset.peekKey || persona?.avatar;
             if (!key) return;
@@ -756,18 +744,26 @@ function createPersonaPanelElement() {
                 delete settings.personaManualTranslations[key];
             }
         };
-        // input: 메모리 즉시 + debounced disk write
         manualTextarea.addEventListener('input', () => {
             writeToMemory();
             saveSettingsDebounced();
+            panel.classList.add('peek-dirty');
         });
-        // blur/change: 메모리 즉시 + 강제 disk write
-        const flushSave = () => {
-            writeToMemory();
-            forceSaveNow();
-        };
-        manualTextarea.addEventListener('blur', flushSave);
-        manualTextarea.addEventListener('change', flushSave);
+        if (manualSaveBtn) {
+            manualSaveBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                writeToMemory();
+                saveSettingsDebounced();
+                panel.classList.remove('peek-dirty');
+                const orig = manualSaveBtn.textContent;
+                manualSaveBtn.textContent = '✓ 저장됨';
+                manualSaveBtn.classList.add('peek-saved-flash');
+                setTimeout(() => {
+                    manualSaveBtn.textContent = orig;
+                    manualSaveBtn.classList.remove('peek-saved-flash');
+                }, 1200);
+            });
+        }
     }
 
     // 지우기 버튼 - 활성 탭에 따라
@@ -1016,7 +1012,11 @@ function createPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣으면 자동 저장돼."></textarea>
+                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣어. 자동 저장되지만 💾 저장 버튼으로 강제 저장도 가능."></textarea>
+                <div class="peek-manual-actions">
+                    <span class="peek-manual-status"></span>
+                    <button class="peek-save-btn peek-save-btn-large" type="button" title="저장">💾 저장</button>
+                </div>
             </div>
         </div>
         <div class="peek-loading-indicator">번역 중...</div>
@@ -1050,8 +1050,9 @@ function createPanelElement() {
         });
     });
 
-    // 수동 번역 textarea
+    // 수동 번역 textarea - input 시 자동 저장
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
+    const manualSaveBtn = panel.querySelector('.peek-tab-manual .peek-save-btn-large');
     if (manualTextarea) {
         const writeToMemory = () => {
             const charKey = manualTextarea.dataset.peekKey || getCurrentCharKey();
@@ -1065,18 +1066,26 @@ function createPanelElement() {
             }
             updateManualMeta(panel, charKey);
         };
-        // input: 메모리 즉시 + debounced disk write
         manualTextarea.addEventListener('input', () => {
             writeToMemory();
             saveSettingsDebounced();
+            panel.classList.add('peek-dirty');
         });
-        // blur/change: 메모리 즉시 + 강제 disk write
-        const flushSave = () => {
-            writeToMemory();
-            forceSaveNow();
-        };
-        manualTextarea.addEventListener('blur', flushSave);
-        manualTextarea.addEventListener('change', flushSave);
+        if (manualSaveBtn) {
+            manualSaveBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                writeToMemory();
+                saveSettingsDebounced();
+                panel.classList.remove('peek-dirty');
+                const orig = manualSaveBtn.textContent;
+                manualSaveBtn.textContent = '✓ 저장됨';
+                manualSaveBtn.classList.add('peek-saved-flash');
+                setTimeout(() => {
+                    manualSaveBtn.textContent = orig;
+                    manualSaveBtn.classList.remove('peek-saved-flash');
+                }, 1200);
+            });
+        }
     }
 
     // 지우기 버튼 - 현재 활성 탭의 데이터만 삭제
@@ -1232,7 +1241,7 @@ function renderSettingsPanel() {
                 </div>
                 <div class="inline-drawer-content">
                     <div class="peek-settings-block">
-                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>패널에 <b>자동/수동</b> 탭이 있어서 외부에서 번역해온 내용도 붙여넣을 수 있어. 📝 메모는 별도 패널.</small>
+                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>패널에 <b>자동/수동</b> 탭이 있어. 수동 번역과 메모는 자동 저장되지만, 안전을 위해 💾 저장 버튼으로 강제 저장도 가능.</small>
 
                         <label for="peek_profile_select"><b>연결 프로필</b></label>
                         <select id="peek_profile_select">${profileOptions}</select>
@@ -1395,9 +1404,9 @@ function updateStatus() {
 }
 
 /**
- * 모든 Peek textarea의 현재 내용을 메모리에 sync + 즉시 disk 저장.
- * 캐릭터/페르소나 전환, 페이지 종료 직전에 호출.
- * blur가 발화 안 되는 케이스 (DOM 통째로 사라짐 등)에 대비한 safety net.
+ * 모든 Peek textarea의 현재 내용을 메모리에 sync + 자동 저장.
+ * 캐릭터/페르소나 전환 시 호출 — blur 못 받는 케이스 (DOM 통째로 사라짐) 대비.
+ * 사용자 요구사항: 저장 안 한 상태에서 캐릭터 전환하면 조용히 자동 저장.
  */
 function flushAllTextareas() {
     try {
@@ -1418,15 +1427,18 @@ function flushAllTextareas() {
         sync('#peek_persona_panel .peek-manual-textarea', 'personaManualTranslations');
         sync('#peek_notes_panel .peek-small-textarea', 'notes');
         sync('#peek_persona_notes_panel .peek-small-textarea', 'personaNotes');
+        saveSettingsDebounced();
+
+        // dirty 표시도 같이 해제
+        document.querySelectorAll('.peek-dirty').forEach(p => p.classList.remove('peek-dirty'));
     } catch (err) {
-        console.error('[Peek] flushAllTextareas 메모리 sync 실패:', err);
+        console.error('[Peek] flushAllTextareas 실패:', err);
     }
-    return forceSaveNow();
 }
 
 /**
  * 캐릭터 변경 / 편집 / 채팅 변경 시 패널 다시 렌더.
- * 전환 직전 모든 textarea를 메모리/디스크에 강제 저장 (blur 못 받는 케이스 방어).
+ * 전환 직전 모든 textarea를 메모리/디스크에 자동 저장.
  */
 function onCharacterContextChange() {
     flushAllTextareas();
@@ -1499,22 +1511,6 @@ jQuery(async () => {
                   return `<option value="${escapeHtml(p.id)}" ${sel}>${escapeHtml(p.name)}</option>`;
               }).join('');
         select.innerHTML = newOptions;
-    });
-
-    // === 데이터 손실 방지: 페이지 종료/숨김 직전 강제 저장 ===
-    // beforeunload는 새로고침/창닫기 직전 발화
-    window.addEventListener('beforeunload', () => {
-        flushAllTextareas();
-    });
-    // pagehide는 모바일/일부 브라우저에서 더 신뢰성 있음
-    window.addEventListener('pagehide', () => {
-        flushAllTextareas();
-    });
-    // 탭 전환/숨김 시에도 (모바일에서 새로고침 전 visibility 변경 일어남)
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'hidden') {
-            flushAllTextareas();
-        }
     });
 
     console.log(`[${EXT_NAME}] 로드 완료`);
