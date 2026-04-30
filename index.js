@@ -44,6 +44,31 @@ const defaultSettings = {
 };
 
 /**
+ * 즉시 disk write를 강제하는 헬퍼.
+ * saveSettingsDebounced는 일정시간 모아 저장해서 새로고침 race에 손실 위험 있음.
+ * blur, 캐릭터/페르소나 전환, 페이지 종료 시점에는 이걸로 강제 저장.
+ */
+async function forceSaveNow() {
+    try {
+        // 1) lodash debounce의 flush() — saveSettingsDebounced 자체가 lodash debounce면 동작
+        if (typeof saveSettingsDebounced?.flush === 'function') {
+            saveSettingsDebounced.flush();
+        }
+        // 2) getContext에서 즉시 저장 함수 — 가장 신뢰할 수 있음
+        const ctx = getContext();
+        if (ctx && typeof ctx.saveSettings === 'function') {
+            await ctx.saveSettings();
+            return;
+        }
+        // 3) 폴백: saveSettingsDebounced 호출 후 약간 대기 (debounce 만료 유도)
+        saveSettingsDebounced();
+    } catch (err) {
+        console.error('[Peek] forceSaveNow 실패, debounced로 폴백:', err);
+        try { saveSettingsDebounced(); } catch (_) {}
+    }
+}
+
+/**
  * 설정 초기화 / 로드
  */
 function loadSettings() {
@@ -401,22 +426,23 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
         applyCollapsedState(panel, settings[collapsedKey]);
     });
 
-    // 입력 즉시 저장 (debounce 없음 - 손실 방지)
+    // 입력 시 메모리에 즉시 반영 + debounced disk write
     textarea.addEventListener('input', () => {
-        const key = getDataKey();
+        const key = textarea.dataset.peekKey || getDataKey();
         if (!key) return;
         onSave(textarea.value, key);
-        // saveSettingsDebounced는 SillyTavern이 자체 debounce 처리하니까 매 입력마다 호출 OK
         saveSettingsDebounced();
     });
 
-    // blur 시 한번 더 강제 저장 (혹시 race로 마지막 입력 손실 대비)
-    textarea.addEventListener('blur', () => {
-        const key = getDataKey();
+    // blur/change 시 즉시 disk write 강제 (새로고침 race 방지)
+    const flushSave = () => {
+        const key = textarea.dataset.peekKey || getDataKey();
         if (!key) return;
         onSave(textarea.value, key);
-        saveSettingsDebounced();
-    });
+        forceSaveNow();
+    };
+    textarea.addEventListener('blur', flushSave);
+    textarea.addEventListener('change', flushSave);
 
     return panel;
 }
@@ -714,23 +740,34 @@ function createPersonaPanelElement() {
         });
     });
 
-    // 수동 번역 textarea - 즉시 저장
+    // 수동 번역 textarea
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     if (manualTextarea) {
-        const saveManual = () => {
+        const writeToMemory = () => {
+            // dataset.peekKey 우선 — 페르소나 컨텍스트 일시 변경 방어
             const persona = getCurrentPersona();
-            if (!persona) return;
+            const key = manualTextarea.dataset.peekKey || persona?.avatar;
+            if (!key) return;
             const settings = loadSettings();
             const val = manualTextarea.value;
             if (val.trim()) {
-                settings.personaManualTranslations[persona.avatar] = { text: val, updatedAt: Date.now() };
+                settings.personaManualTranslations[key] = { text: val, updatedAt: Date.now() };
             } else {
-                delete settings.personaManualTranslations[persona.avatar];
+                delete settings.personaManualTranslations[key];
             }
-            saveSettingsDebounced();
         };
-        manualTextarea.addEventListener('input', saveManual);
-        manualTextarea.addEventListener('blur', saveManual);
+        // input: 메모리 즉시 + debounced disk write
+        manualTextarea.addEventListener('input', () => {
+            writeToMemory();
+            saveSettingsDebounced();
+        });
+        // blur/change: 메모리 즉시 + 강제 disk write
+        const flushSave = () => {
+            writeToMemory();
+            forceSaveNow();
+        };
+        manualTextarea.addEventListener('blur', flushSave);
+        manualTextarea.addEventListener('change', flushSave);
     }
 
     // 지우기 버튼 - 활성 탭에 따라
@@ -1013,11 +1050,11 @@ function createPanelElement() {
         });
     });
 
-    // 수동 번역 textarea - 입력 즉시 저장
+    // 수동 번역 textarea
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     if (manualTextarea) {
-        const saveManual = () => {
-            const charKey = getCurrentCharKey();
+        const writeToMemory = () => {
+            const charKey = manualTextarea.dataset.peekKey || getCurrentCharKey();
             if (!charKey) return;
             const settings = loadSettings();
             const val = manualTextarea.value;
@@ -1026,12 +1063,20 @@ function createPanelElement() {
             } else {
                 delete settings.manualTranslations[charKey];
             }
-            saveSettingsDebounced();
-            // 메타 업데이트만 (textarea 안 건드림)
             updateManualMeta(panel, charKey);
         };
-        manualTextarea.addEventListener('input', saveManual);
-        manualTextarea.addEventListener('blur', saveManual);
+        // input: 메모리 즉시 + debounced disk write
+        manualTextarea.addEventListener('input', () => {
+            writeToMemory();
+            saveSettingsDebounced();
+        });
+        // blur/change: 메모리 즉시 + 강제 disk write
+        const flushSave = () => {
+            writeToMemory();
+            forceSaveNow();
+        };
+        manualTextarea.addEventListener('blur', flushSave);
+        manualTextarea.addEventListener('change', flushSave);
     }
 
     // 지우기 버튼 - 현재 활성 탭의 데이터만 삭제
@@ -1350,9 +1395,41 @@ function updateStatus() {
 }
 
 /**
- * 캐릭터 변경 / 편집 / 채팅 변경 시 패널 다시 렌더
+ * 모든 Peek textarea의 현재 내용을 메모리에 sync + 즉시 disk 저장.
+ * 캐릭터/페르소나 전환, 페이지 종료 직전에 호출.
+ * blur가 발화 안 되는 케이스 (DOM 통째로 사라짐 등)에 대비한 safety net.
+ */
+function flushAllTextareas() {
+    try {
+        const settings = loadSettings();
+        const sync = (selector, store) => {
+            const ta = document.querySelector(selector);
+            if (!ta) return;
+            const key = ta.dataset.peekKey;
+            if (!key) return;
+            const val = ta.value;
+            if (val.trim()) {
+                settings[store][key] = { text: val, updatedAt: Date.now() };
+            } else {
+                delete settings[store][key];
+            }
+        };
+        sync('#peek_translation_panel .peek-manual-textarea', 'manualTranslations');
+        sync('#peek_persona_panel .peek-manual-textarea', 'personaManualTranslations');
+        sync('#peek_notes_panel .peek-small-textarea', 'notes');
+        sync('#peek_persona_notes_panel .peek-small-textarea', 'personaNotes');
+    } catch (err) {
+        console.error('[Peek] flushAllTextareas 메모리 sync 실패:', err);
+    }
+    return forceSaveNow();
+}
+
+/**
+ * 캐릭터 변경 / 편집 / 채팅 변경 시 패널 다시 렌더.
+ * 전환 직전 모든 textarea를 메모리/디스크에 강제 저장 (blur 못 받는 케이스 방어).
  */
 function onCharacterContextChange() {
+    flushAllTextareas();
     renderTranslationPanel();
     renderPersonaPanel();
     updateStatus();
@@ -1422,6 +1499,22 @@ jQuery(async () => {
                   return `<option value="${escapeHtml(p.id)}" ${sel}>${escapeHtml(p.name)}</option>`;
               }).join('');
         select.innerHTML = newOptions;
+    });
+
+    // === 데이터 손실 방지: 페이지 종료/숨김 직전 강제 저장 ===
+    // beforeunload는 새로고침/창닫기 직전 발화
+    window.addEventListener('beforeunload', () => {
+        flushAllTextareas();
+    });
+    // pagehide는 모바일/일부 브라우저에서 더 신뢰성 있음
+    window.addEventListener('pagehide', () => {
+        flushAllTextareas();
+    });
+    // 탭 전환/숨김 시에도 (모바일에서 새로고침 전 visibility 변경 일어남)
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+            flushAllTextareas();
+        }
     });
 
     console.log(`[${EXT_NAME}] 로드 완료`);
