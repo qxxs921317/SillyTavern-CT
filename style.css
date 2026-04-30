@@ -98,7 +98,7 @@
 #peek_persona_panel .peek-panel-header {
     display: flex;
     align-items: center;
-    gap: 8px;
+    justify-content: space-between;
     padding: 8px 12px;
     background: var(--white20a);
     cursor: pointer;
@@ -111,9 +111,6 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    flex: 1;
-    min-width: 0;
-    overflow: hidden;
 }
 
 #peek_translation_panel .peek-panel-header .peek-title-meta,
@@ -121,9 +118,6 @@
     font-size: 0.8em;
     opacity: 0.6;
     font-weight: normal;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
 }
 
 #peek_translation_panel .peek-panel-header .peek-toggle-icon,
@@ -235,7 +229,25 @@
     display: block;
 }
 
-/* === 탭 UI (자동/수동 토글) === */
+/* === v1.6: 탭 UI (자동/수동 토글) === */
+#peek_translation_panel .peek-panel-header,
+#peek_persona_panel .peek-panel-header {
+    gap: 8px;
+}
+
+#peek_translation_panel .peek-panel-header .peek-title,
+#peek_persona_panel .peek-panel-header .peek-title {
+    flex: 1;
+    min-width: 0;
+}
+
+#peek_translation_panel .peek-panel-header .peek-title-meta,
+#peek_persona_panel .peek-panel-header .peek-title-meta {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 #peek_translation_panel .peek-tabs,
 #peek_persona_panel .peek-tabs {
     display: flex;
@@ -273,7 +285,6 @@
     font-weight: 600;
 }
 
-/* 데이터 있는 탭 표시점 */
 #peek_translation_panel .peek-tab.peek-tab-hasdata::after,
 #peek_persona_panel .peek-tab.peek-tab-hasdata::after {
     content: '';
@@ -288,11 +299,6 @@
 }
 
 /* === 수동 번역 큰 textarea === */
-#peek_translation_panel .peek-tab-content,
-#peek_persona_panel .peek-tab-content {
-    /* tab-content 영역 */
-}
-
 #peek_translation_panel .peek-manual-textarea,
 #peek_persona_panel .peek-manual-textarea {
     width: 100%;
@@ -317,7 +323,35 @@
     border-color: var(--SmartThemeQuoteColor, var(--white50a));
 }
 
-/* === 수동번역 / 메모 작은 패널 === */
+#peek_translation_panel .peek-manual-actions,
+#peek_persona_panel .peek-manual-actions {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 8px;
+}
+
+#peek_translation_panel .peek-save-btn-large,
+#peek_persona_panel .peek-save-btn-large {
+    background: transparent;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    color: inherit;
+    font-family: inherit;
+    font-size: 0.9em;
+    padding: 5px 14px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    opacity: 0.8;
+}
+
+#peek_translation_panel .peek-save-btn-large:hover,
+#peek_persona_panel .peek-save-btn-large:hover {
+    opacity: 1;
+    background: var(--white20a);
+}
+
+/* === 메모 작은 패널 === */
 .peek-small-panel {
     margin: 6px 0;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -356,6 +390,26 @@
     white-space: nowrap;
 }
 
+.peek-small-panel .peek-save-btn {
+    background: transparent;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 4px;
+    color: inherit;
+    font-family: inherit;
+    font-size: 0.85em;
+    padding: 1px 7px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.15s, opacity 0.15s;
+    opacity: 0.7;
+    flex-shrink: 0;
+}
+
+.peek-small-panel .peek-save-btn:hover {
+    opacity: 1;
+    background: var(--white20a);
+}
+
 .peek-small-panel .peek-toggle-icon {
     transition: transform 0.2s ease;
     font-size: 0.8em;
@@ -376,7 +430,7 @@
 
 .peek-small-panel .peek-small-textarea {
     width: 100%;
-    min-height: 60px;
+    min-height: 80px;
     resize: vertical;
     background: transparent;
     border: 1px solid var(--SmartThemeBorderColor);
@@ -394,89 +448,18 @@
     border-color: var(--SmartThemeQuoteColor, var(--white50a));
 }
 
-/* === 저장 버튼 === */
-
-/* 작은 패널 헤더 안의 저장 버튼 */
-.peek-small-panel .peek-save-btn {
-    background: transparent;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 4px;
-    color: inherit;
-    font-family: inherit;
-    font-size: 0.78em;
-    padding: 2px 7px;
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-    opacity: 0.65;
-    flex-shrink: 0;
-}
-
-.peek-small-panel .peek-save-btn:hover {
-    opacity: 1;
-    background: var(--white20a);
-}
-
-/* dirty 상태 - 저장 안 된 변경 있음 */
+/* === Dirty 상태 (저장 안 된 변경 있음) === */
 .peek-small-panel.peek-dirty .peek-save-btn,
 #peek_translation_panel.peek-dirty .peek-save-btn-large,
 #peek_persona_panel.peek-dirty .peek-save-btn-large {
     opacity: 1;
     border-color: var(--SmartThemeQuoteColor, #66c);
     background: var(--white20a);
-    animation: peekDirtyPulse 1.5s ease-in-out infinite;
-}
-
-@keyframes peekDirtyPulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(102, 102, 204, 0.0); }
-    50%      { box-shadow: 0 0 0 3px rgba(102, 102, 204, 0.25); }
 }
 
 /* 저장됨 ✓ 플래시 */
 .peek-save-btn.peek-saved-flash,
 .peek-save-btn-large.peek-saved-flash {
-    background: var(--SmartThemeQuoteColor, #4a7) !important;
-    color: white !important;
     border-color: var(--SmartThemeQuoteColor, #4a7) !important;
-    animation: none !important;
-    box-shadow: none !important;
-}
-
-/* === 큰 패널의 수동 번역 탭 액션 영역 === */
-#peek_translation_panel .peek-manual-actions,
-#peek_persona_panel .peek-manual-actions {
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 8px;
-    margin-top: 8px;
-}
-
-#peek_translation_panel .peek-manual-status,
-#peek_persona_panel .peek-manual-status {
-    font-size: 0.8em;
-    opacity: 0.6;
-    flex: 1;
-}
-
-#peek_translation_panel .peek-save-btn-large,
-#peek_persona_panel .peek-save-btn-large {
-    background: transparent;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 5px;
-    color: inherit;
-    font-family: inherit;
-    font-size: 0.9em;
-    padding: 5px 14px;
-    cursor: pointer;
-    user-select: none;
-    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
-    opacity: 0.8;
-    flex-shrink: 0;
-}
-
-#peek_translation_panel .peek-save-btn-large:hover,
-#peek_persona_panel .peek-save-btn-large:hover {
-    opacity: 1;
-    background: var(--white20a);
+    background: var(--white30a) !important;
 }

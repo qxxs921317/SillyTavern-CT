@@ -25,22 +25,20 @@ const TRANSLATABLE_FIELDS = [
 const defaultSettings = {
     profileId: '',
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
-    translations: {},  // 자동 번역(캐릭터): { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
-    personaTranslations: {},  // 자동 번역(페르소나): { [personaAvatar]: { text, translatedAt } }
-    manualTranslations: {},  // 수동 번역(캐릭터): { [avatarKey]: { text, updatedAt } }
-    personaManualTranslations: {},  // 수동 번역(페르소나): { [personaAvatar]: { text, updatedAt } }
-    notes: {},  // 메모(캐릭터): { [avatarKey]: { text, updatedAt } }
-    personaNotes: {},  // 메모(페르소나): { [personaAvatar]: { text, updatedAt } }
+    translations: {},  // 캐릭터: { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
+    personaTranslations: {},  // 페르소나: { [personaAvatar]: { text, translatedAt } }
     panelCollapsed: false,
     personaPanelCollapsed: false,
-    manualPanelCollapsed: true,  // (deprecated, 유지하지만 안 씀 - 기존 호환)
-    notesPanelCollapsed: true,
-    personaManualPanelCollapsed: true,  // (deprecated)
-    personaNotesPanelCollapsed: true,
-    // 활성 탭 - 'auto' or 'manual'
-    activeTab: 'auto',
-    personaActiveTab: 'auto',
     maxResponseTokens: 8192,
+    // === v1.6 추가 - 기존 키 안 건드림 ===
+    manualTranslations: {},        // 캐릭터 수동 번역: { [avatarKey]: { text, updatedAt } }
+    personaManualTranslations: {}, // 페르소나 수동 번역: { [personaAvatar]: { text, updatedAt } }
+    notes: {},                      // 캐릭터 메모
+    personaNotes: {},               // 페르소나 메모
+    activeTab: 'auto',              // 캐릭터 탭 상태: 'auto' | 'manual'
+    personaActiveTab: 'auto',
+    notesPanelCollapsed: true,      // 메모 패널 접힘 상태 (기본 접힘)
+    personaNotesPanelCollapsed: true,
 };
 
 /**
@@ -356,23 +354,36 @@ function updateLoadingMessage(msg) {
     if (indicator) indicator.textContent = msg;
 }
 
-/* ========== 공통: 수동번역/메모 작은 패널 ========== */
+/* ========== 공통: 작은 메모 패널 ========== */
 
 /**
- * 작은 textarea 패널 생성 (메모용).
- * - input 시 메모리에 반영 + 자동 저장 (saveSettingsDebounced)
- * - 저장 버튼으로 명시적 저장도 가능 (dirty 플래그로 미저장 변경 표시)
+ * HTML escape용 (text → attribute 안전)
+ */
+function escapeAttr(str) {
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/**
+ * 작은 메모 패널 생성.
+ *
+ * 저장 정책 - 단순함이 안전함:
+ * - input 시: 메모리에 쓰고 saveSettingsDebounced() 한 번 호출 끝
+ * - 저장 버튼: 메모리에 쓰고 saveSettingsDebounced() 호출 + ✓ 표시
+ * - 그 외 어떤 강제 저장/flush/race 회피 로직도 없음
  *
  * @param {object} opts
  * @param {string} opts.id - 패널 DOM id
- * @param {string} opts.titleText - 헤더에 표시될 제목
+ * @param {string} opts.titleText - 헤더 제목
  * @param {string} opts.placeholder - textarea placeholder
  * @param {string} opts.collapsedKey - 접힘 상태 저장 키
- * @param {function(string, string): void} opts.onSave - (value, dataKey) → 메모리 저장
+ * @param {function(string, string): void} opts.writeToMemory - (value, dataKey) → settings 객체에 쓰기
  * @param {function(): string|null} opts.getDataKey - 현재 활성 dataKey 반환
  * @returns {HTMLElement}
  */
-function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave, getDataKey }) {
+function createMemoPanel({ id, titleText, placeholder, collapsedKey, writeToMemory, getDataKey }) {
     const panel = document.createElement('div');
     panel.id = id;
     panel.className = 'peek-small-panel';
@@ -380,11 +391,11 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
         <div class="peek-small-header">
             <span class="peek-small-title">${titleText}</span>
             <span class="peek-small-meta"></span>
-            <button class="peek-save-btn" type="button" title="저장">💾 저장</button>
+            <button class="peek-save-btn" type="button" title="저장">💾</button>
             <span class="peek-toggle-icon">▼</span>
         </div>
         <div class="peek-small-body">
-            <textarea class="peek-small-textarea" placeholder="${escapeHtml(placeholder)}" rows="3"></textarea>
+            <textarea class="peek-small-textarea" placeholder="${escapeAttr(placeholder)}" rows="3"></textarea>
         </div>
     `;
 
@@ -392,7 +403,7 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
     const textarea = panel.querySelector('.peek-small-textarea');
     const saveBtn = panel.querySelector('.peek-save-btn');
 
-    // 접기/펼치기 (저장 버튼 클릭 시는 무시)
+    // 접기/펼치기 (저장 버튼 클릭 시 무시)
     header.addEventListener('click', (e) => {
         if (e.target.closest('.peek-save-btn')) return;
         const settings = loadSettings();
@@ -401,26 +412,25 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
         applyCollapsedState(panel, settings[collapsedKey]);
     });
 
-    // 입력 시: 메모리에 즉시 반영 + 자동 저장 + dirty 표시
+    // input: 메모리 + 자동 저장 + dirty 표시
     textarea.addEventListener('input', () => {
-        const key = textarea.dataset.peekKey || getDataKey();
+        const key = getDataKey();
         if (!key) return;
-        onSave(textarea.value, key);
+        writeToMemory(textarea.value, key);
         saveSettingsDebounced();
         panel.classList.add('peek-dirty');
     });
 
-    // 명시적 저장 버튼
+    // 저장 버튼: 명시적 저장 + ✓ 표시
     saveBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        const key = textarea.dataset.peekKey || getDataKey();
+        const key = getDataKey();
         if (!key) return;
-        onSave(textarea.value, key);
+        writeToMemory(textarea.value, key);
         saveSettingsDebounced();
         panel.classList.remove('peek-dirty');
-        // 잠깐 ✓ 표시
         const orig = saveBtn.textContent;
-        saveBtn.textContent = '✓ 저장됨';
+        saveBtn.textContent = '✓';
         saveBtn.classList.add('peek-saved-flash');
         setTimeout(() => {
             saveBtn.textContent = orig;
@@ -432,7 +442,7 @@ function createSmallTextPanel({ id, titleText, placeholder, collapsedKey, onSave
 }
 
 /**
- * 패널의 접힘 상태 적용
+ * 패널 접힘 상태 적용
  */
 function applyCollapsedState(panel, isCollapsed) {
     if (isCollapsed) panel.classList.add('peek-collapsed');
@@ -440,23 +450,23 @@ function applyCollapsedState(panel, isCollapsed) {
 }
 
 /**
- * 작은 패널의 textarea/메타 업데이트.
- * 데이터 키가 바뀌거나, 처음 생성된 직후일 때만 textarea value를 갱신.
- * 같은 키에서 재호출되면 textarea는 절대 안 건드림 (입력 중 손실 방지).
+ * 작은 패널 textarea/메타 업데이트 (캐릭터 키 바뀔 때만 textarea 새로 채움).
+ * 같은 키에서 재호출되면 textarea는 안 건드림 — 입력 중 덮어쓰기 방지.
+ * (이건 race 만들지 않는 단순 비교라 안전함)
  */
-function updateSmallPanel(panel, dataKey, value, updatedAt, isCollapsed) {
+function updateMemoPanel(panel, dataKey, value, updatedAt, isCollapsed) {
     if (!panel) return;
     const textarea = panel.querySelector('.peek-small-textarea');
     const meta = panel.querySelector('.peek-small-meta');
 
     if (textarea) {
         const currentKey = textarea.dataset.peekKey;
-        // 처음 만들어졌거나, 키가 바뀐 경우만 value 갱신
-        if (currentKey === undefined || currentKey !== dataKey) {
+        if (currentKey !== dataKey) {
             textarea.value = value || '';
             textarea.dataset.peekKey = dataKey || '';
+            // 키가 바뀌었으니 dirty 해제
+            panel.classList.remove('peek-dirty');
         }
-        // 같은 키면 textarea 안 건드림 — 사용자 입력 보호
     }
 
     if (meta) {
@@ -538,10 +548,12 @@ function renderPersonaPanel() {
 
     let panel = document.getElementById('peek_persona_panel');
 
-    // 페르소나 컨트롤 영역이 안 보이면 (페르소나 탭이 닫혀있으면) 패널도 의미 없음
+    // 페르소나 컨트롤 영역이 안 보이면 패널도 숨김
     const personaControls = document.getElementById('persona_controls');
     if (!personaControls || !persona) {
         if (panel) panel.style.display = 'none';
+        const np = document.getElementById('peek_persona_notes_panel');
+        if (np) np.style.display = 'none';
         return;
     }
 
@@ -566,7 +578,7 @@ function renderPersonaPanel() {
         activeTab = 'manual';
     }
 
-    // 탭 버튼 활성/데이터 표시
+    // 탭 활성/데이터 표시
     panel.querySelectorAll('.peek-tab').forEach(t => {
         if (t.dataset.tab === activeTab) t.classList.add('peek-tab-active');
         else t.classList.remove('peek-tab-active');
@@ -575,11 +587,11 @@ function renderPersonaPanel() {
         else t.classList.remove('peek-tab-hasdata');
     });
 
-    // 접힘 상태
+    // 접힘
     if (settings.personaPanelCollapsed) panel.classList.add('peek-collapsed');
     else panel.classList.remove('peek-collapsed');
 
-    // 탭 콘텐츠 표시
+    // 탭 전환
     const autoContent = panel.querySelector('.peek-tab-auto');
     const manualContent = panel.querySelector('.peek-tab-manual');
     if (activeTab === 'auto') {
@@ -600,20 +612,21 @@ function renderPersonaPanel() {
         }
     }
 
-    // 자동 탭 본문
+    // 자동 본문
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>👀 버튼을 눌러서 번역해봐</div>`;
     } else {
         autoContent.innerHTML = `<div class="peek-field-content">${escapeHtml(tr.text)}</div>`;
     }
 
-    // 수동 탭 textarea (입력 보호)
+    // 수동 textarea - 페르소나 키 바뀐 경우만 갱신
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     if (manualTextarea) {
         const currentKey = manualTextarea.dataset.peekKey;
-        if (currentKey === undefined || currentKey !== persona.avatar) {
+        if (currentKey !== persona.avatar) {
             manualTextarea.value = manual?.text || '';
             manualTextarea.dataset.peekKey = persona.avatar;
+            panel.classList.remove('peek-dirty');
         }
     }
 
@@ -634,20 +647,20 @@ function renderPersonaPanel() {
 }
 
 /**
- * 페르소나 패널 아래에 메모 패널 렌더링
+ * 페르소나 메모 패널 렌더링
  */
 function renderPersonaNotesPanel(translationPanel, personaAvatar) {
     const settings = loadSettings();
 
     let notesPanel = document.getElementById('peek_persona_notes_panel');
     if (!notesPanel) {
-        notesPanel = createSmallTextPanel({
+        notesPanel = createMemoPanel({
             id: 'peek_persona_notes_panel',
             titleText: '📝 메모',
-            placeholder: '페르소나 변경 내역, 메모, 자유 노트 등.',
+            placeholder: '페르소나 변경 내역, 자유 노트 등.',
             collapsedKey: 'personaNotesPanelCollapsed',
             getDataKey: () => getCurrentPersona()?.avatar || null,
-            onSave: (val, key) => {
+            writeToMemory: (val, key) => {
                 const s = loadSettings();
                 if (val.trim()) {
                     s.personaNotes[key] = { text: val, updatedAt: Date.now() };
@@ -659,8 +672,9 @@ function renderPersonaNotesPanel(translationPanel, personaAvatar) {
         translationPanel.parentNode.insertBefore(notesPanel, translationPanel.nextSibling);
     }
 
+    notesPanel.style.display = '';
     const note = settings.personaNotes[personaAvatar];
-    updateSmallPanel(
+    updateMemoPanel(
         notesPanel,
         personaAvatar,
         note?.text || '',
@@ -691,10 +705,9 @@ function createPersonaPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣어. 자동 저장되지만 💾 저장 버튼으로 강제 저장도 가능."></textarea>
+                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣어. 자동 저장돼."></textarea>
                 <div class="peek-manual-actions">
-                    <span class="peek-manual-status"></span>
-                    <button class="peek-save-btn peek-save-btn-large" type="button" title="저장">💾 저장</button>
+                    <button class="peek-save-btn-large" type="button">💾 저장</button>
                 </div>
             </div>
         </div>
@@ -707,7 +720,7 @@ function createPersonaPanelElement() {
         </div>
     `;
 
-    // 헤더 클릭 → 접기/펼치기 (탭 영역 제외)
+    // 헤더 클릭 → 접기/펼치기 (탭 영역 무시)
     panel.querySelector('.peek-panel-header').addEventListener('click', (e) => {
         if (e.target.closest('.peek-tab') || e.target.closest('.peek-tabs')) return;
         const settings = loadSettings();
@@ -728,31 +741,30 @@ function createPersonaPanelElement() {
         });
     });
 
-    // 수동 번역 textarea - input 시 자동 저장
+    // 수동 textarea + 저장 버튼
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
-    const manualSaveBtn = panel.querySelector('.peek-tab-manual .peek-save-btn-large');
+    const manualSaveBtn = panel.querySelector('.peek-save-btn-large');
     if (manualTextarea) {
-        const writeToMemory = () => {
+        const writeManual = () => {
             const persona = getCurrentPersona();
-            const key = manualTextarea.dataset.peekKey || persona?.avatar;
-            if (!key) return;
+            if (!persona) return;
             const settings = loadSettings();
             const val = manualTextarea.value;
             if (val.trim()) {
-                settings.personaManualTranslations[key] = { text: val, updatedAt: Date.now() };
+                settings.personaManualTranslations[persona.avatar] = { text: val, updatedAt: Date.now() };
             } else {
-                delete settings.personaManualTranslations[key];
+                delete settings.personaManualTranslations[persona.avatar];
             }
         };
         manualTextarea.addEventListener('input', () => {
-            writeToMemory();
+            writeManual();
             saveSettingsDebounced();
             panel.classList.add('peek-dirty');
         });
         if (manualSaveBtn) {
             manualSaveBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                writeToMemory();
+                writeManual();
                 saveSettingsDebounced();
                 panel.classList.remove('peek-dirty');
                 const orig = manualSaveBtn.textContent;
@@ -766,7 +778,7 @@ function createPersonaPanelElement() {
         }
     }
 
-    // 지우기 버튼 - 활성 탭에 따라
+    // 지우기 버튼 - 활성 탭 데이터만
     panel.querySelector('[data-action="clear-persona"]').addEventListener('click', async (e) => {
         e.stopPropagation();
         const persona = getCurrentPersona();
@@ -842,6 +854,9 @@ function renderTranslationPanel() {
     // 캐릭터 없으면 패널 숨김
     if (!char || !charKey) {
         if (panel) panel.style.display = 'none';
+        // 메모 패널도 숨김
+        const np = document.getElementById('peek_notes_panel');
+        if (np) np.style.display = 'none';
         return;
     }
 
@@ -862,28 +877,21 @@ function renderTranslationPanel() {
     const hasManual = manual && manual.text && manual.text.trim();
 
     // 활성 탭 결정
-    // - 사용자가 명시적으로 선택한 탭 우선
-    // - 첫 진입(또는 둘 다 없음): auto가 기본
-    // - auto는 비어있는데 manual만 있으면 manual로 자동 전환 (초기 진입 시)
     let activeTab = settings.activeTab || 'auto';
     if (!hasAuto && hasManual && (!settings.activeTab || settings.activeTab === 'auto')) {
         activeTab = 'manual';
     }
 
-    // 탭 버튼 활성 상태 표시
+    // 탭 버튼 활성/데이터 표시
     panel.querySelectorAll('.peek-tab').forEach(t => {
-        if (t.dataset.tab === activeTab) {
-            t.classList.add('peek-tab-active');
-        } else {
-            t.classList.remove('peek-tab-active');
-        }
-        // 데이터 있는 탭에는 점 표시
+        if (t.dataset.tab === activeTab) t.classList.add('peek-tab-active');
+        else t.classList.remove('peek-tab-active');
         const has = t.dataset.tab === 'auto' ? hasAuto : hasManual;
         if (has) t.classList.add('peek-tab-hasdata');
         else t.classList.remove('peek-tab-hasdata');
     });
 
-    // 접힘 상태 적용
+    // 접힘 상태
     if (settings.panelCollapsed) panel.classList.add('peek-collapsed');
     else panel.classList.remove('peek-collapsed');
 
@@ -898,7 +906,7 @@ function renderTranslationPanel() {
         manualContent.style.display = '';
     }
 
-    // 헤더 메타 (탭에 따라 다름)
+    // 헤더 메타
     const titleMeta = panel.querySelector('.peek-title-meta');
     if (titleMeta) {
         if (activeTab === 'auto') {
@@ -908,7 +916,7 @@ function renderTranslationPanel() {
         }
     }
 
-    // 자동 탭 본문 렌더
+    // 자동 탭 본문
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>캐릭터 설명 옆 👀 버튼을 눌러서 번역해봐</div>`;
     } else {
@@ -927,17 +935,18 @@ function renderTranslationPanel() {
         autoContent.innerHTML = blocks.join('');
     }
 
-    // 수동 탭 textarea - 키가 바뀐 경우만 value 갱신 (입력 중 손실 방지)
+    // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     if (manualTextarea) {
         const currentKey = manualTextarea.dataset.peekKey;
-        if (currentKey === undefined || currentKey !== charKey) {
+        if (currentKey !== charKey) {
             manualTextarea.value = manual?.text || '';
             manualTextarea.dataset.peekKey = charKey;
+            panel.classList.remove('peek-dirty');
         }
     }
 
-    // 푸터 - 활성 탭에 맞춰서
+    // 푸터
     const footer = panel.querySelector('.peek-footer-time');
     if (footer) {
         if (activeTab === 'auto' && hasAuto) {
@@ -956,20 +965,20 @@ function renderTranslationPanel() {
 }
 
 /**
- * 캐릭터 패널 아래에 메모 패널 렌더링 (수동 번역은 메인 패널의 탭으로 이동)
+ * 캐릭터 패널 아래에 메모 패널 렌더링
  */
 function renderCharNotesPanel(translationPanel, charKey) {
     const settings = loadSettings();
 
     let notesPanel = document.getElementById('peek_notes_panel');
     if (!notesPanel) {
-        notesPanel = createSmallTextPanel({
+        notesPanel = createMemoPanel({
             id: 'peek_notes_panel',
             titleText: '📝 메모',
-            placeholder: '캐릭터 시트 변경 내역, 메모, 자유 노트 등.',
+            placeholder: '캐릭터 시트 변경 내역, 자유 노트 등.',
             collapsedKey: 'notesPanelCollapsed',
             getDataKey: () => getCurrentCharKey(),
-            onSave: (val, key) => {
+            writeToMemory: (val, key) => {
                 const s = loadSettings();
                 if (val.trim()) {
                     s.notes[key] = { text: val, updatedAt: Date.now() };
@@ -981,8 +990,9 @@ function renderCharNotesPanel(translationPanel, charKey) {
         translationPanel.parentNode.insertBefore(notesPanel, translationPanel.nextSibling);
     }
 
+    notesPanel.style.display = '';
     const note = settings.notes[charKey];
-    updateSmallPanel(
+    updateMemoPanel(
         notesPanel,
         charKey,
         note?.text || '',
@@ -992,7 +1002,7 @@ function renderCharNotesPanel(translationPanel, charKey) {
 }
 
 /**
- * 패널 DOM 요소 생성 - 탭 구조 (자동 / 수동)
+ * 패널 DOM 요소 생성
  */
 function createPanelElement() {
     const panel = document.createElement('div');
@@ -1012,10 +1022,9 @@ function createPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣어. 자동 저장되지만 💾 저장 버튼으로 강제 저장도 가능."></textarea>
+                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣어. 자동 저장돼."></textarea>
                 <div class="peek-manual-actions">
-                    <span class="peek-manual-status"></span>
-                    <button class="peek-save-btn peek-save-btn-large" type="button" title="저장">💾 저장</button>
+                    <button class="peek-save-btn-large" type="button">💾 저장</button>
                 </div>
             </div>
         </div>
@@ -1028,7 +1037,7 @@ function createPanelElement() {
         </div>
     `;
 
-    // 헤더 클릭 → 접기/펼치기 (탭/토글 버튼 영역 제외)
+    // 헤더 클릭 → 접기/펼치기 (탭 영역 클릭은 무시)
     panel.querySelector('.peek-panel-header').addEventListener('click', (e) => {
         if (e.target.closest('.peek-tab') || e.target.closest('.peek-tabs')) return;
         const settings = loadSettings();
@@ -1043,7 +1052,6 @@ function createPanelElement() {
             e.stopPropagation();
             const settings = loadSettings();
             settings.activeTab = tab.dataset.tab;
-            // 접혀있으면 자동으로 펼침
             settings.panelCollapsed = false;
             saveSettingsDebounced();
             renderTranslationPanel();
@@ -1052,10 +1060,10 @@ function createPanelElement() {
 
     // 수동 번역 textarea - input 시 자동 저장
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
-    const manualSaveBtn = panel.querySelector('.peek-tab-manual .peek-save-btn-large');
+    const manualSaveBtn = panel.querySelector('.peek-save-btn-large');
     if (manualTextarea) {
-        const writeToMemory = () => {
-            const charKey = manualTextarea.dataset.peekKey || getCurrentCharKey();
+        const writeManual = () => {
+            const charKey = getCurrentCharKey();
             if (!charKey) return;
             const settings = loadSettings();
             const val = manualTextarea.value;
@@ -1064,17 +1072,16 @@ function createPanelElement() {
             } else {
                 delete settings.manualTranslations[charKey];
             }
-            updateManualMeta(panel, charKey);
         };
         manualTextarea.addEventListener('input', () => {
-            writeToMemory();
+            writeManual();
             saveSettingsDebounced();
             panel.classList.add('peek-dirty');
         });
         if (manualSaveBtn) {
             manualSaveBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                writeToMemory();
+                writeManual();
                 saveSettingsDebounced();
                 panel.classList.remove('peek-dirty');
                 const orig = manualSaveBtn.textContent;
@@ -1088,7 +1095,7 @@ function createPanelElement() {
         }
     }
 
-    // 지우기 버튼 - 현재 활성 탭의 데이터만 삭제
+    // 지우기 버튼 - 현재 활성 탭 데이터만 삭제
     panel.querySelector('[data-action="clear"]').addEventListener('click', async (e) => {
         e.stopPropagation();
         const charKey = getCurrentCharKey();
@@ -1105,11 +1112,10 @@ function createPanelElement() {
             delete settings.translations[charKey];
         } else {
             delete settings.manualTranslations[charKey];
-            // textarea도 직접 비우기
             const ta = panel.querySelector('.peek-manual-textarea');
             if (ta) {
                 ta.value = '';
-                ta.dataset.peekKey = charKey; // 키는 유지
+                ta.dataset.peekKey = charKey;
             }
         }
         saveSettingsDebounced();
@@ -1118,18 +1124,6 @@ function createPanelElement() {
     });
 
     return panel;
-}
-
-/**
- * 캐릭터 수동 번역 패널의 메타 (마지막 수정 시각) 업데이트
- */
-function updateManualMeta(panel, charKey) {
-    const settings = loadSettings();
-    const m = settings.manualTranslations[charKey];
-    const meta = panel.querySelector('.peek-title-meta');
-    if (settings.activeTab === 'manual' && meta) {
-        meta.textContent = m?.updatedAt ? `· 수정: ${new Date(m.updatedAt).toLocaleString()}` : '';
-    }
 }
 
 /**
@@ -1241,7 +1235,7 @@ function renderSettingsPanel() {
                 </div>
                 <div class="inline-drawer-content">
                     <div class="peek-settings-block">
-                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>패널에 <b>자동/수동</b> 탭이 있어. 수동 번역과 메모는 자동 저장되지만, 안전을 위해 💾 저장 버튼으로 강제 저장도 가능.</small>
+                        <small style="opacity:0.75;">캐릭터 카드 / 페르소나를 한국어로 번역해서 보여줘. 실제 데이터는 안 건드림.<br>패널에 <b>자동/수동</b> 탭이 있어. 수동 번역과 메모는 자동 저장되고 💾 버튼으로 강제 저장도 가능.</small>
 
                         <label for="peek_profile_select"><b>연결 프로필</b></label>
                         <select id="peek_profile_select">${profileOptions}</select>
@@ -1251,14 +1245,6 @@ function renderSettingsPanel() {
 
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
-
-                        <hr style="border:none;border-top:1px solid var(--SmartThemeBorderColor);margin:8px 0 4px;">
-                        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
-                            <small style="opacity:0.7;">저장된 모든 번역/메모 데이터를 한 번에 삭제</small>
-                            <button id="peek_clear_all_btn" class="menu_button" style="white-space:nowrap;">
-                                🗑 전체 삭제
-                            </button>
-                        </div>
 
                         <div class="peek-status" id="peek_status"></div>
                     </div>
@@ -1329,56 +1315,6 @@ function bindSettingsEvents() {
             }
         });
     }
-
-    const clearBtn = document.getElementById('peek_clear_all_btn');
-    if (clearBtn) {
-        clearBtn.addEventListener('click', async () => {
-            const settings = loadSettings();
-            const charCount = Object.keys(settings.translations || {}).length;
-            const personaCount = Object.keys(settings.personaTranslations || {}).length;
-            const manualCount = Object.keys(settings.manualTranslations || {}).length;
-            const personaManualCount = Object.keys(settings.personaManualTranslations || {}).length;
-            const noteCount = Object.keys(settings.notes || {}).length;
-            const personaNoteCount = Object.keys(settings.personaNotes || {}).length;
-            const total = charCount + personaCount + manualCount + personaManualCount + noteCount + personaNoteCount;
-
-            if (total === 0) {
-                toastr.info('삭제할 데이터가 없어', EXT_NAME);
-                return;
-            }
-
-            const confirmed = await Popup.show.confirm(
-                '⚠ 전체 데이터 삭제',
-                `<div style="text-align:left;">
-                    <p>저장된 모든 데이터를 삭제할까? <b>되돌릴 수 없어.</b></p>
-                    <ul style="font-size:0.9em;opacity:0.85;">
-                        <li>캐릭터 자동 번역: ${charCount}개</li>
-                        <li>캐릭터 수동 번역: ${manualCount}개</li>
-                        <li>캐릭터 메모: ${noteCount}개</li>
-                        <li>페르소나 자동 번역: ${personaCount}개</li>
-                        <li>페르소나 수동 번역: ${personaManualCount}개</li>
-                        <li>페르소나 메모: ${personaNoteCount}개</li>
-                    </ul>
-                    <p style="font-size:0.85em;opacity:0.7;">설정(프로필, 토큰 한도, 필드 선택)은 그대로 유지돼.</p>
-                </div>`
-            );
-            if (!confirmed) return;
-
-            settings.translations = {};
-            settings.personaTranslations = {};
-            settings.manualTranslations = {};
-            settings.personaManualTranslations = {};
-            settings.notes = {};
-            settings.personaNotes = {};
-            saveSettingsDebounced();
-
-            // 패널 다시 그리기
-            renderTranslationPanel();
-            renderPersonaPanel();
-
-            toastr.success(`${total}개 데이터 삭제됨`, EXT_NAME);
-        });
-    }
 }
 
 /**
@@ -1404,44 +1340,9 @@ function updateStatus() {
 }
 
 /**
- * 모든 Peek textarea의 현재 내용을 메모리에 sync + 자동 저장.
- * 캐릭터/페르소나 전환 시 호출 — blur 못 받는 케이스 (DOM 통째로 사라짐) 대비.
- * 사용자 요구사항: 저장 안 한 상태에서 캐릭터 전환하면 조용히 자동 저장.
- */
-function flushAllTextareas() {
-    try {
-        const settings = loadSettings();
-        const sync = (selector, store) => {
-            const ta = document.querySelector(selector);
-            if (!ta) return;
-            const key = ta.dataset.peekKey;
-            if (!key) return;
-            const val = ta.value;
-            if (val.trim()) {
-                settings[store][key] = { text: val, updatedAt: Date.now() };
-            } else {
-                delete settings[store][key];
-            }
-        };
-        sync('#peek_translation_panel .peek-manual-textarea', 'manualTranslations');
-        sync('#peek_persona_panel .peek-manual-textarea', 'personaManualTranslations');
-        sync('#peek_notes_panel .peek-small-textarea', 'notes');
-        sync('#peek_persona_notes_panel .peek-small-textarea', 'personaNotes');
-        saveSettingsDebounced();
-
-        // dirty 표시도 같이 해제
-        document.querySelectorAll('.peek-dirty').forEach(p => p.classList.remove('peek-dirty'));
-    } catch (err) {
-        console.error('[Peek] flushAllTextareas 실패:', err);
-    }
-}
-
-/**
- * 캐릭터 변경 / 편집 / 채팅 변경 시 패널 다시 렌더.
- * 전환 직전 모든 textarea를 메모리/디스크에 자동 저장.
+ * 캐릭터 변경 / 편집 / 채팅 변경 시 패널 다시 렌더
  */
 function onCharacterContextChange() {
-    flushAllTextareas();
     renderTranslationPanel();
     renderPersonaPanel();
     updateStatus();
