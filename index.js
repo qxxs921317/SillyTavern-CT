@@ -619,7 +619,19 @@ function renderPersonaPanel() {
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>👀 버튼을 눌러서 번역해봐</div>`;
     } else {
-        autoContent.innerHTML = `<div class="peek-field-content">${escapeHtml(tr.text)}</div>`;
+        autoContent.innerHTML = `
+            <div class="peek-field-block">
+                <div class="peek-field-content">${escapeHtml(tr.text)}</div>
+                <button class="peek-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
+            </div>
+        `;
+        const copyBtn = autoContent.querySelector('.peek-copy-btn');
+        if (copyBtn) {
+            copyBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                copyTextWithFeedback(tr.text, copyBtn);
+            });
+        }
     }
 
     // 수동 textarea - 페르소나 키 바뀐 경우만 갱신
@@ -929,13 +941,27 @@ function renderTranslationPanel() {
             if (!tr || !tr.text) continue;
             const safeText = escapeHtml(tr.text);
             blocks.push(`
-                <div class="peek-field-block">
+                <div class="peek-field-block" data-field-key="${escapeHtml(field.key)}">
                     <div class="peek-field-label">${field.label} · ${field.desc}</div>
                     <div class="peek-field-content">${safeText}</div>
+                    <button class="peek-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
                 </div>
             `);
         }
         autoContent.innerHTML = blocks.join('');
+
+        // 필드별 복사 버튼 연결
+        autoContent.querySelectorAll('.peek-field-block').forEach(block => {
+            const key = block.dataset.fieldKey;
+            const btn = block.querySelector('.peek-copy-btn');
+            const tr = charTranslations[key];
+            if (btn && tr && tr.text) {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    copyTextWithFeedback(tr.text, btn);
+                });
+            }
+        });
     }
 
     // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
@@ -1201,6 +1227,40 @@ function escapeHtml(str) {
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
+}
+
+/**
+ * 텍스트를 클립보드에 복사하고 버튼에 완료 피드백을 잠깐 표시
+ */
+async function copyTextWithFeedback(text, btn) {
+    if (!text) return;
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            document.body.removeChild(ta);
+        }
+        toastr.success('복사했어', EXT_NAME);
+        if (btn) {
+            const icon = btn.querySelector('i');
+            const prevClass = icon ? icon.className : null;
+            btn.classList.add('peek-copied');
+            if (icon) icon.className = 'fa-solid fa-check';
+            setTimeout(() => {
+                btn.classList.remove('peek-copied');
+                if (icon && prevClass) icon.className = prevClass;
+            }, 1200);
+        }
+    } catch (err) {
+        toastr.error('복사 실패: ' + err.message, EXT_NAME);
+    }
 }
 
 /**

@@ -149,12 +149,48 @@
     font-size: 0.9em;
 }
 
-#peek_translation_panel .peek-field-block {
+#peek_translation_panel .peek-field-block,
+#peek_persona_panel .peek-field-block {
+    position: relative;
     margin-bottom: 14px;
 }
 
-#peek_translation_panel .peek-field-block:last-child {
+#peek_translation_panel .peek-field-block:last-child,
+#peek_persona_panel .peek-field-block:last-child {
     margin-bottom: 0;
+}
+
+#peek_translation_panel .peek-copy-btn,
+#peek_persona_panel .peek-copy-btn {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: var(--white30a);
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.45;
+    font-size: 11px;
+    color: inherit;
+    transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+#peek_translation_panel .peek-copy-btn:hover,
+#peek_persona_panel .peek-copy-btn:hover {
+    opacity: 1;
+    background: var(--white20a);
+}
+
+#peek_translation_panel .peek-copy-btn.peek-copied,
+#peek_persona_panel .peek-copy-btn.peek-copied {
+    opacity: 1;
+    color: var(--SmartThemeQuoteColor, #4caf50);
 }
 
 #peek_translation_panel .peek-field-label {
@@ -171,7 +207,7 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.5;
-    padding: 8px 12px;
+    padding: 8px 30px 8px 12px;
     background: transparent;
     border-left: 3px solid var(--SmartThemeQuoteColor, var(--white30a));
     border-radius: 0 4px 4px 0;
