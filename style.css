@@ -193,6 +193,22 @@
     color: var(--SmartThemeQuoteColor, #4caf50);
 }
 
+#peek_translation_panel .peek-manual-textarea-wrap,
+#peek_persona_panel .peek-manual-textarea-wrap {
+    position: relative;
+}
+
+#peek_translation_panel .peek-manual-textarea-wrap .peek-manual-textarea,
+#peek_persona_panel .peek-manual-textarea-wrap .peek-manual-textarea {
+    padding-right: 30px;
+}
+
+#peek_translation_panel .peek-manual-copy-btn,
+#peek_persona_panel .peek-manual-copy-btn {
+    top: 8px;
+    right: 8px;
+}
+
 #peek_translation_panel .peek-field-label {
     font-size: 0.75em;
     text-transform: uppercase;

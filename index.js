@@ -720,7 +720,10 @@ function createPersonaPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣어. 자동 저장돼."></textarea>
+                <div class="peek-manual-textarea-wrap">
+                    <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 페르소나 설명을 여기 붙여넣어. 자동 저장돼."></textarea>
+                    <button class="peek-copy-btn peek-manual-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
+                </div>
                 <div class="peek-manual-actions">
                     <button class="peek-save-btn-large" type="button">💾 저장</button>
                 </div>
@@ -759,6 +762,13 @@ function createPersonaPanelElement() {
     // 수동 textarea + 저장 버튼
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     const manualSaveBtn = panel.querySelector('.peek-save-btn-large');
+    const manualCopyBtn = panel.querySelector('.peek-manual-copy-btn');
+    if (manualCopyBtn && manualTextarea) {
+        manualCopyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyTextWithFeedback(manualTextarea.value, manualCopyBtn);
+        });
+    }
     if (manualTextarea) {
         const writeManual = () => {
             const persona = getCurrentPersona();
@@ -1051,7 +1061,10 @@ function createPanelElement() {
         <div class="peek-panel-body">
             <div class="peek-tab-content peek-tab-auto"></div>
             <div class="peek-tab-content peek-tab-manual" style="display:none;">
-                <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣어. 자동 저장돼."></textarea>
+                <div class="peek-manual-textarea-wrap">
+                    <textarea class="peek-manual-textarea" placeholder="외부에서 번역해온 내용을 여기 붙여넣어. 자동 저장돼."></textarea>
+                    <button class="peek-copy-btn peek-manual-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
+                </div>
                 <div class="peek-manual-actions">
                     <button class="peek-save-btn-large" type="button">💾 저장</button>
                 </div>
@@ -1090,6 +1103,13 @@ function createPanelElement() {
     // 수동 번역 textarea - input 시 자동 저장
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
     const manualSaveBtn = panel.querySelector('.peek-save-btn-large');
+    const manualCopyBtn = panel.querySelector('.peek-manual-copy-btn');
+    if (manualCopyBtn && manualTextarea) {
+        manualCopyBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            copyTextWithFeedback(manualTextarea.value, manualCopyBtn);
+        });
+    }
     if (manualTextarea) {
         const writeManual = () => {
             const charKey = getCurrentCharKey();
