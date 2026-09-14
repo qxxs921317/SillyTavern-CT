@@ -541,3 +541,9 @@
     min-width: 110px;
     margin: 0;
 }
+
+/* 로딩 중 패널 살짝 흐리게 (파일 읽는 동안) */
+#peek_translation_panel.peek-loading .peek-panel-body,
+#peek_persona_panel.peek-loading .peek-panel-body {
+    transition: opacity 0.15s ease;
+}

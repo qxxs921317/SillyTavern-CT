@@ -25,16 +25,14 @@ const TRANSLATABLE_FIELDS = [
 const defaultSettings = {
     profileId: '',
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
-    translations: {},  // 캐릭터: { [avatarKey]: { [fieldKey]: { text, translatedAt } } }
-    personaTranslations: {},  // 페르소나: { [personaAvatar]: { text, translatedAt } }
     panelCollapsed: false,
     personaPanelCollapsed: false,
     maxResponseTokens: 8192,
-    // === v1.6 추가 - 기존 키 안 건드림 ===
-    manualTranslations: {},        // 캐릭터 수동 번역: { [avatarKey]: { text, updatedAt } }
-    personaManualTranslations: {}, // 페르소나 수동 번역: { [personaAvatar]: { text, updatedAt } }
-    notes: {},                      // 캐릭터 메모
-    personaNotes: {},               // 페르소나 메모
+    // === v1.7 - 번역/메모 데이터는 settings가 아니라 /user/files 에 저장됨 ===
+    // 레거시 키(translations, notes 등)는 기존 유저 데이터라 여기서 재생성하지 않음.
+    fileIndex: {},                  // { "char:Sera.png": { file, updatedAt } }
+    legacyTombstones: {},           // 유저가 지운 엔티티 — 레거시에서 부활 방지
+    storageMode: 'file',            // 'file' | 'legacy'
     activeTab: 'auto',              // 캐릭터 탭 상태: 'auto' | 'manual'
     personaActiveTab: 'auto',
     notesPanelCollapsed: true,      // 메모 패널 접힘 상태 (기본 접힘)
@@ -55,6 +53,307 @@ function loadSettings() {
         }
     }
     return extension_settings[EXT_ID];
+}
+
+/* ===================================================================
+ * 파일 기반 저장소 (v1.7)
+ *
+ * 번역/메모 데이터는 settings.json이 아니라 /user/files/peek_*.json 에
+ * 캐릭터 1명당 파일 1개로 저장됨. settings에는 인덱스만 남음.
+ *
+ * 기존 유저 보호:
+ *  - 읽기는 캐시 → 파일 → 레거시(settings) 순으로 폴백
+ *  - 레거시 데이터는 자동으로 지우지 않음 (정리 버튼으로만)
+ *  - 파일 API가 없거나 실패하면 레거시 모드로 자동 강등
+ * =================================================================== */
+
+const FILE_UPLOAD_URL = '/api/files/upload';
+const FILE_DELETE_URL = '/api/files/delete';
+const FILE_DIR = '/user/files';
+
+// 런타임 데이터 — extension_settings 바깥에 두는 게 핵심
+const peekData = {
+    translations: {},
+    personaTranslations: {},
+    manualTranslations: {},
+    personaManualTranslations: {},
+    notes: {},
+    personaNotes: {},
+};
+
+// kind별 섹션 매핑
+const SECTIONS = {
+    char: { auto: 'translations', manual: 'manualTranslations', note: 'notes' },
+    persona: { auto: 'personaTranslations', manual: 'personaManualTranslations', note: 'personaNotes' },
+};
+
+let charRenderGen = 0;              // 렌더 세대 — 늦게 도착한 응답이 덮어쓰는 것 방지
+let personaRenderGen = 0;
+
+const loadedEntities = new Set();   // "char:Sera.png"
+const pendingWrites = new Map();    // entityId -> timeout id
+let storageFailed = false;          // 파일 API 사용 불가
+let storageWarned = false;
+
+function entityId(kind, key) {
+    return `${kind}:${key}`;
+}
+
+function isEntityLoaded(kind, key) {
+    return !key || loadedEntities.has(entityId(kind, key));
+}
+
+/**
+ * FNV-1a 32bit — crypto.subtle은 LAN(http) 접속에서 사용 불가라 순수 JS로 구현
+ */
+function fnv1a(str, seed) {
+    let h = seed >>> 0;
+    for (let i = 0; i < str.length; i++) {
+        const c = str.charCodeAt(i);
+        h = Math.imul(h ^ (c & 0xff), 0x01000193) >>> 0;
+        h = Math.imul(h ^ ((c >>> 8) & 0xff), 0x01000193) >>> 0;
+    }
+    return h >>> 0;
+}
+
+/**
+ * 키 → 16자리 hex. 서버가 한글/공백/슬래시 파일명을 거부하므로 해시 필수.
+ */
+function keyHash(str) {
+    const a = fnv1a(str, 0x811c9dc5);
+    const b = fnv1a(`${str}\u0001peek`, 0x9e3779b1);
+    return a.toString(16).padStart(8, '0') + b.toString(16).padStart(8, '0');
+}
+
+function entityFileName(kind, key) {
+    return `peek_${kind === 'persona' ? 'p' : 'c'}_${keyHash(key)}.json`;
+}
+
+function reqHeaders() {
+    try {
+        const ctx = getContext();
+        if (typeof ctx.getRequestHeaders === 'function') return ctx.getRequestHeaders();
+    } catch { /* noop */ }
+    return { 'Content-Type': 'application/json' };
+}
+
+/**
+ * UTF-8 안전 base64 (한글/이모지 포함)
+ */
+function toBase64(str) {
+    const bytes = new TextEncoder().encode(str);
+    let bin = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return btoa(bin);
+}
+
+async function readEntityFile(fileName) {
+    const res = await fetch(`${FILE_DIR}/${fileName}`, { headers: reqHeaders(), cache: 'no-store' });
+    if (res.status === 404) return null;
+    if (!res.ok) throw new Error(`읽기 실패 (${res.status})`);
+    return await res.json();
+}
+
+async function writeEntityFile(fileName, payload) {
+    const res = await fetch(FILE_UPLOAD_URL, {
+        method: 'POST',
+        headers: reqHeaders(),
+        body: JSON.stringify({ name: fileName, data: toBase64(JSON.stringify(payload)) }),
+    });
+    if (!res.ok) throw new Error(`저장 실패 (${res.status})`);
+    const json = await res.json().catch(() => null);
+    return json?.path || `${FILE_DIR}/${fileName}`;
+}
+
+async function removeEntityFile(fileName) {
+    const res = await fetch(FILE_DELETE_URL, {
+        method: 'POST',
+        headers: reqHeaders(),
+        body: JSON.stringify({ path: `${FILE_DIR}/${fileName}` }),
+    });
+    return res.ok;
+}
+
+/**
+ * 파일/레거시에서 읽은 데이터를 런타임 저장소에 반영
+ */
+function applyEntityData(kind, key, obj) {
+    const sec = SECTIONS[kind];
+    const slots = [['auto', sec.auto], ['manual', sec.manual], ['note', sec.note]];
+    for (const [slot, section] of slots) {
+        const val = obj?.[slot];
+        if (val === undefined || val === null) delete peekData[section][key];
+        else peekData[section][key] = val;
+    }
+}
+
+function collectEntityData(kind, key) {
+    const sec = SECTIONS[kind];
+    return {
+        v: 1,
+        kind,
+        key,
+        auto: peekData[sec.auto][key] ?? null,
+        manual: peekData[sec.manual][key] ?? null,
+        note: peekData[sec.note][key] ?? null,
+        updatedAt: Date.now(),
+    };
+}
+
+function isEntityEmpty(payload) {
+    return !payload.auto && !payload.manual && !payload.note;
+}
+
+/**
+ * 레거시(settings) 안에 있는 이 엔티티의 데이터
+ */
+function legacyEntityData(kind, key) {
+    const raw = extension_settings[EXT_ID] || {};
+    const sec = SECTIONS[kind];
+    const auto = raw[sec.auto]?.[key] ?? null;
+    const manual = raw[sec.manual]?.[key] ?? null;
+    const note = raw[sec.note]?.[key] ?? null;
+    if (!auto && !manual && !note) return null;
+    return { auto, manual, note };
+}
+
+/**
+ * 엔티티 로드 — 캐시 → 파일 → 레거시
+ */
+async function ensureEntity(kind, key) {
+    if (!key || !SECTIONS[kind]) return;
+    const id = entityId(kind, key);
+    if (loadedEntities.has(id)) return;
+
+    const settings = loadSettings();
+    const indexed = settings.fileIndex?.[id];
+    const tombstoned = !!settings.legacyTombstones?.[id];
+    let data = null;
+
+    if (indexed?.file && !storageFailed) {
+        try {
+            const file = await readEntityFile(indexed.file);
+            if (file && file.key === key) {
+                data = file;
+            } else if (file) {
+                // 해시 충돌 등 — 신뢰할 수 없으니 레거시로 폴백
+                console.warn('[Peek] 파일 키 불일치:', indexed.file, file.key, '≠', key);
+            }
+        } catch (err) {
+            console.warn('[Peek] 파일 읽기 실패:', err);
+        }
+    }
+
+    if (!data && !tombstoned) {
+        const legacy = legacyEntityData(kind, key);
+        if (legacy) {
+            loadedEntities.add(id);
+            applyEntityData(kind, key, legacy);
+            schedulePersist(kind, key, 0);   // 파일로 이관 (레거시는 그대로 둠)
+            return;
+        }
+    }
+
+    loadedEntities.add(id);
+    if (data) applyEntityData(kind, key, data);
+}
+
+/**
+ * 저장 예약 — 타이핑 중 연타 방지
+ */
+function schedulePersist(kind, key, delay = 700) {
+    if (!key) return;
+    const id = entityId(kind, key);
+    clearTimeout(pendingWrites.get(id));
+    pendingWrites.set(id, setTimeout(() => {
+        pendingWrites.delete(id);
+        persistEntity(kind, key).catch(err => console.error('[Peek] 저장 실패:', err));
+    }, delay));
+}
+
+/**
+ * 실제 저장. 실패하면 레거시 모드로 강등하고 데이터는 settings에 보존
+ */
+async function persistEntity(kind, key) {
+    if (!key || !SECTIONS[kind]) return;
+    const id = entityId(kind, key);
+    loadedEntities.add(id);
+
+    if (storageFailed) {
+        persistLegacy(kind, key);
+        return;
+    }
+
+    const settings = loadSettings();
+    const payload = collectEntityData(kind, key);
+    const fileName = entityFileName(kind, key);
+
+    try {
+        if (isEntityEmpty(payload)) {
+            if (settings.fileIndex?.[id]) {
+                await removeEntityFile(settings.fileIndex[id].file);
+                delete settings.fileIndex[id];
+            }
+            // 레거시에 같은 키가 남아있으면 다음 로드 때 되살아나므로 묘비 표시
+            if (legacyEntityData(kind, key)) {
+                if (!settings.legacyTombstones) settings.legacyTombstones = {};
+                settings.legacyTombstones[id] = true;
+            }
+            saveSettingsDebounced();
+            return;
+        }
+        await writeEntityFile(fileName, payload);
+        if (!settings.fileIndex) settings.fileIndex = {};
+        settings.fileIndex[id] = { file: fileName, updatedAt: payload.updatedAt };
+        settings.storageMode = 'file';
+        saveSettingsDebounced();
+    } catch (err) {
+        console.error('[Peek] 파일 저장 실패 — 레거시 모드로 전환:', err);
+        storageFailed = true;
+        loadSettings().storageMode = 'legacy';
+        if (!storageWarned) {
+            storageWarned = true;
+            toastr.warning('파일 저장에 실패해서 기존 방식(설정 저장)으로 전환했어. 데이터는 안 날아가.', EXT_NAME);
+        }
+        persistLegacy(kind, key);
+    }
+}
+
+/**
+ * 레거시 모드 — 예전처럼 settings에 직접 씀
+ */
+function persistLegacy(kind, key) {
+    const raw = loadSettings();
+    const sec = SECTIONS[kind];
+    for (const section of [sec.auto, sec.manual, sec.note]) {
+        if (!raw[section]) raw[section] = {};
+        const val = peekData[section][key];
+        if (val === undefined) delete raw[section][key];
+        else raw[section][key] = val;
+    }
+    saveSettingsDebounced();
+}
+
+/**
+ * 최근 쓴 엔티티 미리 로드 (동시 3건) — 부팅 부하 최소화
+ */
+async function preloadRecent(limit = 20) {
+    if (storageFailed) return;
+    const settings = loadSettings();
+    const entries = Object.entries(settings.fileIndex || {})
+        .sort((a, b) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0))
+        .slice(0, limit);
+
+    for (let i = 0; i < entries.length; i += 3) {
+        await Promise.all(entries.slice(i, i + 3).map(([id]) => {
+            const sep = id.indexOf(':');
+            if (sep < 0) return Promise.resolve();
+            return ensureEntity(id.slice(0, sep), id.slice(sep + 1)).catch(() => {});
+        }));
+    }
 }
 
 /**
@@ -305,8 +604,8 @@ async function runTranslation() {
     const panel = document.getElementById('peek_translation_panel');
     if (panel) panel.classList.add('peek-loading');
 
-    if (!settings.translations[charKey]) {
-        settings.translations[charKey] = {};
+    if (!peekData.translations[charKey]) {
+        peekData.translations[charKey] = {};
     }
 
     let success = 0;
@@ -321,7 +620,7 @@ async function runTranslation() {
                 field.label,
                 sourceText
             );
-            settings.translations[charKey][field.key] = {
+            peekData.translations[charKey][field.key] = {
                 text: translated,
                 translatedAt: Date.now(),
             };
@@ -333,7 +632,7 @@ async function runTranslation() {
         }
     }
 
-    saveSettingsDebounced();
+    await persistEntity('char', charKey);
     if (panel) panel.classList.remove('peek-loading');
     renderTranslationPanel();
 
@@ -383,7 +682,7 @@ function escapeAttr(str) {
  * @param {function(): string|null} opts.getDataKey - 현재 활성 dataKey 반환
  * @returns {HTMLElement}
  */
-function createMemoPanel({ id, titleText, placeholder, collapsedKey, writeToMemory, getDataKey }) {
+function createMemoPanel({ id, titleText, placeholder, collapsedKey, writeToMemory, getDataKey, persistKind }) {
     const panel = document.createElement('div');
     panel.id = id;
     panel.className = 'peek-small-panel';
@@ -417,7 +716,7 @@ function createMemoPanel({ id, titleText, placeholder, collapsedKey, writeToMemo
         const key = getDataKey();
         if (!key) return;
         writeToMemory(textarea.value, key);
-        saveSettingsDebounced();
+        schedulePersist(persistKind, key);
         panel.classList.add('peek-dirty');
     });
 
@@ -427,7 +726,7 @@ function createMemoPanel({ id, titleText, placeholder, collapsedKey, writeToMemo
         const key = getDataKey();
         if (!key) return;
         writeToMemory(textarea.value, key);
-        saveSettingsDebounced();
+        schedulePersist(persistKind, key, 0);
         panel.classList.remove('peek-dirty');
         const orig = saveBtn.textContent;
         saveBtn.textContent = '✓';
@@ -524,11 +823,11 @@ async function runPersonaTranslation() {
             'Persona Description',
             persona.description
         );
-        settings.personaTranslations[persona.avatar] = {
+        peekData.personaTranslations[persona.avatar] = {
             text: translated,
             translatedAt: Date.now(),
         };
-        saveSettingsDebounced();
+        await persistEntity('persona', persona.avatar);
         toastr.success('페르소나 번역 완료!', EXT_NAME);
     } catch (err) {
         console.error('[Peek] 페르소나 번역 실패:', err);
@@ -571,9 +870,23 @@ function renderPersonaPanel() {
 
     panel.style.display = '';
 
-    const tr = settings.personaTranslations[persona.avatar];
+    if (!isEntityLoaded('persona', persona.avatar)) {
+        const gen = ++personaRenderGen;
+        const avatar = persona.avatar;
+        panel.classList.add('peek-loading');
+        ensureEntity('persona', avatar).finally(() => {
+            if (gen !== personaRenderGen) return;
+            if (getCurrentPersona()?.avatar !== avatar) return;
+            panel.classList.remove('peek-loading');
+            renderPersonaPanel();
+        });
+        return;
+    }
+    panel.classList.remove('peek-loading');
+
+    const tr = peekData.personaTranslations[persona.avatar];
     const hasAuto = tr && tr.text;
-    const manual = settings.personaManualTranslations[persona.avatar];
+    const manual = peekData.personaManualTranslations[persona.avatar];
     const hasManual = manual && manual.text && manual.text.trim();
 
     let activeTab = settings.personaActiveTab || 'auto';
@@ -674,13 +987,14 @@ function renderPersonaNotesPanel(translationPanel, personaAvatar) {
             titleText: '📝 메모',
             placeholder: '페르소나 변경 내역, 자유 노트 등.',
             collapsedKey: 'personaNotesPanelCollapsed',
+            persistKind: 'persona',
             getDataKey: () => getCurrentPersona()?.avatar || null,
             writeToMemory: (val, key) => {
                 const s = loadSettings();
                 if (val.trim()) {
-                    s.personaNotes[key] = { text: val, updatedAt: Date.now() };
+                    peekData.personaNotes[key] = { text: val, updatedAt: Date.now() };
                 } else {
-                    delete s.personaNotes[key];
+                    delete peekData.personaNotes[key];
                 }
             },
         });
@@ -688,7 +1002,7 @@ function renderPersonaNotesPanel(translationPanel, personaAvatar) {
     }
 
     notesPanel.style.display = '';
-    const note = settings.personaNotes[personaAvatar];
+    const note = peekData.personaNotes[personaAvatar];
     updateMemoPanel(
         notesPanel,
         personaAvatar,
@@ -776,21 +1090,21 @@ function createPersonaPanelElement() {
             const settings = loadSettings();
             const val = manualTextarea.value;
             if (val.trim()) {
-                settings.personaManualTranslations[persona.avatar] = { text: val, updatedAt: Date.now() };
+                peekData.personaManualTranslations[persona.avatar] = { text: val, updatedAt: Date.now() };
             } else {
-                delete settings.personaManualTranslations[persona.avatar];
+                delete peekData.personaManualTranslations[persona.avatar];
             }
         };
         manualTextarea.addEventListener('input', () => {
             writeManual();
-            saveSettingsDebounced();
+            schedulePersist('persona', persona?.avatar);
             panel.classList.add('peek-dirty');
         });
         if (manualSaveBtn) {
             manualSaveBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 writeManual();
-                saveSettingsDebounced();
+                schedulePersist('persona', persona?.avatar, 0);
                 panel.classList.remove('peek-dirty');
                 const orig = manualSaveBtn.textContent;
                 manualSaveBtn.textContent = '✓ 저장됨';
@@ -817,16 +1131,16 @@ function createPersonaPanelElement() {
         );
         if (!confirmed) return;
         if (tab === 'auto') {
-            delete settings.personaTranslations[persona.avatar];
+            delete peekData.personaTranslations[persona.avatar];
         } else {
-            delete settings.personaManualTranslations[persona.avatar];
+            delete peekData.personaManualTranslations[persona.avatar];
             const ta = panel.querySelector('.peek-manual-textarea');
             if (ta) {
                 ta.value = '';
                 ta.dataset.peekKey = persona.avatar;
             }
         }
-        saveSettingsDebounced();
+        await persistEntity('persona', persona.avatar);
         renderPersonaPanel();
         toastr.info(`${tabName} 삭제됨`, EXT_NAME);
     });
@@ -896,9 +1210,24 @@ function renderTranslationPanel() {
 
     panel.style.display = '';
 
-    const charTranslations = settings.translations[charKey] || {};
+    // 파일에서 아직 안 읽어온 캐릭터면 로딩 표시 후 비동기 로드
+    if (!isEntityLoaded('char', charKey)) {
+        const gen = ++charRenderGen;
+        panel.classList.add('peek-loading');
+        updateLoadingMessage('불러오는 중...');
+        ensureEntity('char', charKey).finally(() => {
+            if (gen !== charRenderGen) return;              // 더 최신 렌더가 있음
+            if (getCurrentCharKey() !== charKey) return;    // 그새 캐릭터 바뀜
+            panel.classList.remove('peek-loading');
+            renderTranslationPanel();
+        });
+        return;
+    }
+    panel.classList.remove('peek-loading');
+
+    const charTranslations = peekData.translations[charKey] || {};
     const hasAuto = Object.keys(charTranslations).length > 0;
-    const manual = settings.manualTranslations[charKey];
+    const manual = peekData.manualTranslations[charKey];
     const hasManual = manual && manual.text && manual.text.trim();
 
     // 활성 탭 결정
@@ -1016,13 +1345,14 @@ function renderCharNotesPanel(translationPanel, charKey) {
             titleText: '📝 메모',
             placeholder: '캐릭터 시트 변경 내역, 자유 노트 등.',
             collapsedKey: 'notesPanelCollapsed',
+            persistKind: 'char',
             getDataKey: () => getCurrentCharKey(),
             writeToMemory: (val, key) => {
                 const s = loadSettings();
                 if (val.trim()) {
-                    s.notes[key] = { text: val, updatedAt: Date.now() };
+                    peekData.notes[key] = { text: val, updatedAt: Date.now() };
                 } else {
-                    delete s.notes[key];
+                    delete peekData.notes[key];
                 }
             },
         });
@@ -1030,7 +1360,7 @@ function renderCharNotesPanel(translationPanel, charKey) {
     }
 
     notesPanel.style.display = '';
-    const note = settings.notes[charKey];
+    const note = peekData.notes[charKey];
     updateMemoPanel(
         notesPanel,
         charKey,
@@ -1117,21 +1447,21 @@ function createPanelElement() {
             const settings = loadSettings();
             const val = manualTextarea.value;
             if (val.trim()) {
-                settings.manualTranslations[charKey] = { text: val, updatedAt: Date.now() };
+                peekData.manualTranslations[charKey] = { text: val, updatedAt: Date.now() };
             } else {
-                delete settings.manualTranslations[charKey];
+                delete peekData.manualTranslations[charKey];
             }
         };
         manualTextarea.addEventListener('input', () => {
             writeManual();
-            saveSettingsDebounced();
+            schedulePersist('char', getCurrentCharKey());
             panel.classList.add('peek-dirty');
         });
         if (manualSaveBtn) {
             manualSaveBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 writeManual();
-                saveSettingsDebounced();
+                schedulePersist('char', getCurrentCharKey(), 0);
                 panel.classList.remove('peek-dirty');
                 const orig = manualSaveBtn.textContent;
                 manualSaveBtn.textContent = '✓ 저장됨';
@@ -1158,16 +1488,16 @@ function createPanelElement() {
         );
         if (!confirmed) return;
         if (tab === 'auto') {
-            delete settings.translations[charKey];
+            delete peekData.translations[charKey];
         } else {
-            delete settings.manualTranslations[charKey];
+            delete peekData.manualTranslations[charKey];
             const ta = panel.querySelector('.peek-manual-textarea');
             if (ta) {
                 ta.value = '';
                 ta.dataset.peekKey = charKey;
             }
         }
-        saveSettingsDebounced();
+        await persistEntity('char', charKey);
         renderTranslationPanel();
         toastr.info(`${tabName} 삭제됨`, EXT_NAME);
     });
@@ -1303,39 +1633,83 @@ const BACKUP_SECTIONS = {
 
 const BACKUP_FORMAT = 'peek-backup';
 
+// 섹션 → kind 매핑
+const SECTION_KIND = {
+    translations: 'char',
+    manualTranslations: 'char',
+    notes: 'char',
+    personaTranslations: 'persona',
+    personaManualTranslations: 'persona',
+    personaNotes: 'persona',
+};
+
+function splitEntityId(id) {
+    const sep = id.indexOf(':');
+    return sep < 0 ? null : { kind: id.slice(0, sep), key: id.slice(sep + 1) };
+}
+
 /**
- * 백업 대상 데이터만 추린 크기(KB)
+ * settings 안에 남아있는 레거시 데이터 크기(KB)
  */
-function getPeekDataSizeKB() {
-    const settings = loadSettings();
+function legacySizeKB() {
+    const raw = extension_settings[EXT_ID] || {};
     const payload = {};
     for (const key of Object.keys(BACKUP_SECTIONS)) {
-        payload[key] = settings[key] || {};
+        if (raw[key]) payload[key] = raw[key];
     }
     return JSON.stringify(payload).length / 1024;
 }
 
 /**
- * 섹션별 항목 수 세기
+ * 알고 있는 모든 엔티티 id (파일 인덱스 + 레거시 + 메모리)
  */
-function countSection(obj, depth) {
-    if (!obj || typeof obj !== 'object') return 0;
-    if (depth === 1) return Object.keys(obj).length;
-    return Object.values(obj).reduce(
-        (n, v) => n + (v && typeof v === 'object' ? Object.keys(v).length : 0),
-        0,
-    );
+function allEntityIds() {
+    const settings = loadSettings();
+    const raw = extension_settings[EXT_ID] || {};
+    const ids = new Set(Object.keys(settings.fileIndex || {}));
+    for (const [section, kind] of Object.entries(SECTION_KIND)) {
+        for (const key of Object.keys(raw[section] || {})) ids.add(entityId(kind, key));
+        for (const key of Object.keys(peekData[section] || {})) ids.add(entityId(kind, key));
+    }
+    return [...ids];
 }
 
 /**
- * 현재 데이터로 백업 객체 만들기
+ * 전체 엔티티를 메모리로 로드 (동시 4건)
  */
-function buildBackupObject() {
-    const settings = loadSettings();
-    const data = {};
-    for (const key of Object.keys(BACKUP_SECTIONS)) {
-        data[key] = structuredClone(settings[key] || {});
+async function loadAllEntities(onProgress) {
+    const ids = allEntityIds();
+    for (let i = 0; i < ids.length; i += 4) {
+        await Promise.all(ids.slice(i, i + 4).map(id => {
+            const e = splitEntityId(id);
+            return e ? ensureEntity(e.kind, e.key).catch(() => {}) : Promise.resolve();
+        }));
+        if (onProgress) onProgress(Math.min(i + 4, ids.length), ids.length);
     }
+    return ids.length;
+}
+
+/**
+ * 현재 데이터로 백업 객체 만들기 (파일 + 레거시 전부 포함)
+ */
+async function buildBackupObject(onProgress) {
+    await loadAllEntities(onProgress);
+    const settings = loadSettings();
+    const raw = extension_settings[EXT_ID] || {};
+    const tombs = settings.legacyTombstones || {};
+    const data = {};
+
+    for (const section of Object.keys(BACKUP_SECTIONS)) {
+        data[section] = structuredClone(peekData[section] || {});
+        // 아직 메모리에 안 올라온 레거시 잔여분 합치기 (삭제된 건 제외)
+        const kind = SECTION_KIND[section];
+        for (const [key, val] of Object.entries(raw[section] || {})) {
+            if (data[section][key] !== undefined) continue;
+            if (tombs[entityId(kind, key)]) continue;
+            data[section][key] = structuredClone(val);
+        }
+    }
+
     return {
         format: BACKUP_FORMAT,
         formatVersion: 1,
@@ -1370,16 +1744,29 @@ function downloadJson(obj, filename) {
 }
 
 /**
+ * 섹션별 항목 수 세기
+ */
+function countSection(obj, depth) {
+    if (!obj || typeof obj !== 'object') return 0;
+    if (depth === 1) return Object.keys(obj).length;
+    return Object.values(obj).reduce(
+        (n, v) => n + (v && typeof v === 'object' ? Object.keys(v).length : 0),
+        0,
+    );
+}
+
+/**
  * 내보내기
  */
-function exportPeekData(silent = false, suffix = '') {
+async function exportPeekData(silent = false, suffix = '') {
     try {
-        const backup = buildBackupObject();
-        const name = `peek-backup-${backupTimestamp()}${suffix}.json`;
-        downloadJson(backup, name);
+        if (!silent) toastr.info('데이터 수집 중...', EXT_NAME);
+        const backup = await buildBackupObject();
+        downloadJson(backup, `peek-backup-${backupTimestamp()}${suffix}.json`);
         if (!silent) {
             const chars = Object.keys(backup.data.translations || {}).length;
-            toastr.success(`백업 저장됨 (캐릭터 ${chars}명, ${getPeekDataSizeKB().toFixed(0)}KB)`, EXT_NAME);
+            const kb = JSON.stringify(backup).length / 1024;
+            toastr.success(`백업 저장됨 (캐릭터 ${chars}명 · ${kb.toFixed(0)}KB)`, EXT_NAME);
         }
         return true;
     } catch (err) {
@@ -1390,21 +1777,24 @@ function exportPeekData(silent = false, suffix = '') {
 }
 
 /**
- * 섹션 병합
- * overwrite=false면 기존 항목은 절대 안 건드리고 없는 것만 추가
+ * 섹션 병합. overwrite=false면 기존 항목은 안 건드리고 없는 것만 추가
  */
-function mergeSection(target, source, depth, overwrite, stats) {
+function mergeSection(target, source, depth, overwrite, stats, touched, kind) {
     for (const [key, val] of Object.entries(source || {})) {
         if (val === null || typeof val !== 'object') continue;
         if (depth === 2) {
             if (!target[key] || typeof target[key] !== 'object') target[key] = {};
-            mergeSection(target[key], val, 1, overwrite, stats);
+            const before = JSON.stringify(target[key]);
+            mergeSection(target[key], val, 1, overwrite, stats, null, kind);
+            if (touched && JSON.stringify(target[key]) !== before) touched.add(entityId(kind, key));
         } else if (target[key] === undefined) {
             target[key] = structuredClone(val);
             stats.added++;
+            if (touched) touched.add(entityId(kind, key));
         } else if (overwrite) {
             target[key] = structuredClone(val);
             stats.replaced++;
+            if (touched) touched.add(entityId(kind, key));
         } else {
             stats.skipped++;
         }
@@ -1421,19 +1811,10 @@ function parseBackup(text) {
     } catch {
         throw new Error('JSON 파싱 실패 — 올바른 백업 파일이 아니야');
     }
-    if (!parsed || typeof parsed !== 'object') {
-        throw new Error('내용이 비어있어');
-    }
-
-    // 정식 백업 파일
-    if (parsed.format === BACKUP_FORMAT && parsed.data) {
-        return parsed.data;
-    }
-    // 관대한 폴백: extension_settings.peek 를 통째로 덤프한 경우도 받아줌
+    if (!parsed || typeof parsed !== 'object') throw new Error('내용이 비어있어');
+    if (parsed.format === BACKUP_FORMAT && parsed.data) return parsed.data;
     const hasSection = Object.keys(BACKUP_SECTIONS).some(k => parsed[k] && typeof parsed[k] === 'object');
-    if (hasSection) {
-        return parsed;
-    }
+    if (hasSection) return parsed;
     throw new Error('Peek 백업 파일이 아닌 것 같아');
 }
 
@@ -1443,22 +1824,20 @@ function parseBackup(text) {
 async function importPeekData(file, overwrite) {
     let data;
     try {
-        const text = await file.text();
-        data = parseBackup(text);
+        data = parseBackup(await file.text());
     } catch (err) {
         toastr.error(err.message, EXT_NAME);
         return;
     }
 
-    const charFields = countSection(data.translations, 2);
     const charCount = Object.keys(data.translations || {}).length;
+    const charFields = countSection(data.translations, 2);
     const personaCount = countSection(data.personaTranslations, 1);
-    const manualCount = countSection(data.manualTranslations, 1)
-        + countSection(data.personaManualTranslations, 1);
+    const manualCount = countSection(data.manualTranslations, 1) + countSection(data.personaManualTranslations, 1);
     const noteCount = countSection(data.notes, 1) + countSection(data.personaNotes, 1);
 
     const modeText = overwrite
-        ? '<b style="color:var(--warning,#e8a33d);">덮어쓰기</b> — 같은 키가 있으면 파일 내용으로 교체돼'
+        ? '<b style="color:#e8a33d;">덮어쓰기</b> — 같은 키는 파일 내용으로 교체돼'
         : '<b>병합</b> — 기존 항목은 그대로 두고 없는 것만 추가돼';
 
     const confirmed = await Popup.show.confirm(
@@ -1470,30 +1849,59 @@ async function importPeekData(file, overwrite) {
 • 수동 번역: ${manualCount}개
 • 메모: ${noteCount}개</pre>
             <p style="font-size:0.9em;">모드: ${modeText}</p>
-            <p style="font-size:0.85em;opacity:0.7;">안전을 위해 <b>지금 상태를 먼저 파일로 자동 백업</b>한 다음 진행할게.</p>
+            <p style="font-size:0.85em;opacity:0.7;">진행 전에 <b>지금 상태를 파일로 자동 백업</b>할게.</p>
         </div>`,
     );
     if (!confirmed) return;
 
-    // 되돌릴 수 있게 현재 상태를 먼저 떨궈둠
-    const backedUp = exportPeekData(true, '-before-import');
-    if (!backedUp) {
-        toastr.error('사전 백업에 실패해서 가져오기를 중단했어', EXT_NAME);
+    if (!await exportPeekData(true, '-before-import')) {
+        toastr.error('사전 백업 실패 — 가져오기를 중단했어', EXT_NAME);
         return;
     }
 
-    const settings = loadSettings();
-    const stats = { added: 0, replaced: 0, skipped: 0 };
-
-    for (const [key, depth] of Object.entries(BACKUP_SECTIONS)) {
-        if (!data[key] || typeof data[key] !== 'object') continue;
-        if (!settings[key] || typeof settings[key] !== 'object') settings[key] = {};
-        mergeSection(settings[key], data[key], depth, overwrite, stats);
+    // 병합 판단이 정확하려면 대상 엔티티를 먼저 메모리에 올려야 함
+    const targetIds = new Set();
+    for (const [section, kind] of Object.entries(SECTION_KIND)) {
+        for (const key of Object.keys(data[section] || {})) targetIds.add(entityId(kind, key));
+    }
+    const idList = [...targetIds];
+    for (let i = 0; i < idList.length; i += 4) {
+        await Promise.all(idList.slice(i, i + 4).map(id => {
+            const e = splitEntityId(id);
+            return e ? ensureEntity(e.kind, e.key).catch(() => {}) : Promise.resolve();
+        }));
     }
 
-    saveSettingsDebounced();
-    updateDataSizeDisplay();
+    const stats = { added: 0, replaced: 0, skipped: 0 };
+    const touched = new Set();
+    for (const [section, depth] of Object.entries(BACKUP_SECTIONS)) {
+        if (!data[section] || typeof data[section] !== 'object') continue;
+        mergeSection(peekData[section], data[section], depth, overwrite, stats, touched, SECTION_KIND[section]);
+    }
 
+    // 되살린 항목의 묘비 제거
+    const settings = loadSettings();
+    for (const id of touched) {
+        if (settings.legacyTombstones?.[id]) delete settings.legacyTombstones[id];
+    }
+
+    // 변경된 엔티티만 저장 (동시 3건)
+    const list = [...touched];
+    let saved = 0;
+    for (let i = 0; i < list.length; i += 3) {
+        await Promise.all(list.slice(i, i + 3).map(async id => {
+            const e = splitEntityId(id);
+            if (!e) return;
+            try {
+                await persistEntity(e.kind, e.key);
+                saved++;
+            } catch (err) {
+                console.error('[Peek] 가져오기 저장 실패:', id, err);
+            }
+        }));
+    }
+
+    updateDataSizeDisplay();
     try {
         renderTranslationPanel();
         renderPersonaPanel();
@@ -1504,7 +1912,102 @@ async function importPeekData(file, overwrite) {
     const parts = [`추가 ${stats.added}`];
     if (stats.replaced) parts.push(`교체 ${stats.replaced}`);
     if (stats.skipped) parts.push(`유지 ${stats.skipped}`);
-    toastr.success(`가져오기 완료 (${parts.join(' · ')})`, EXT_NAME);
+    toastr.success(`가져오기 완료 (${parts.join(' · ')}) · ${saved}개 저장됨`, EXT_NAME);
+}
+
+/**
+ * 레거시(settings) 데이터를 파일로 이전 + 검증 후 정리
+ */
+async function migrateLegacyToFiles() {
+    const settings = loadSettings();
+    const raw = extension_settings[EXT_ID] || {};
+
+    const ids = new Set();
+    for (const [section, kind] of Object.entries(SECTION_KIND)) {
+        for (const key of Object.keys(raw[section] || {})) ids.add(entityId(kind, key));
+    }
+    if (ids.size === 0) {
+        toastr.info('이전할 레거시 데이터가 없어', EXT_NAME);
+        return;
+    }
+    if (storageFailed) {
+        toastr.error('파일 저장이 동작하지 않는 상태라 이전할 수 없어', EXT_NAME);
+        return;
+    }
+
+    const kb = legacySizeKB();
+    const confirmed = await Popup.show.confirm(
+        '기존 데이터 파일로 이전',
+        `<div style="text-align:left;">
+            <p>settings에 남아있는 <b>${ids.size}개 항목 (${kb.toFixed(0)}KB)</b>을 파일로 옮길까?</p>
+            <p style="font-size:0.9em;opacity:0.8;">① 자동 백업 → ② 파일로 쓰기 → ③ 하나씩 다시 읽어 검증 → ④ 전부 통과하면 삭제 여부를 다시 물어봄</p>
+            <p style="font-size:0.85em;opacity:0.7;">검증에 하나라도 실패하면 기존 데이터는 그대로 둘게.</p>
+        </div>`,
+    );
+    if (!confirmed) return;
+
+    if (!await exportPeekData(true, '-before-migrate')) {
+        toastr.error('사전 백업 실패 — 이전을 중단했어', EXT_NAME);
+        return;
+    }
+
+    const list = [...ids];
+    const failures = [];
+    let done = 0;
+
+    for (const id of list) {
+        const e = splitEntityId(id);
+        if (!e) continue;
+        try {
+            await ensureEntity(e.kind, e.key);
+            await persistEntity(e.kind, e.key);
+
+            // 검증: 파일을 실제로 다시 읽어서 내용 비교
+            const entry = loadSettings().fileIndex?.[id];
+            if (!entry?.file) throw new Error('인덱스 없음');
+            const back = await readEntityFile(entry.file);
+            if (!back || back.key !== e.key) throw new Error('키 불일치');
+            const expect = collectEntityData(e.kind, e.key);
+            const norm = (o) => JSON.stringify({ auto: o.auto ?? null, manual: o.manual ?? null, note: o.note ?? null });
+            if (norm(back) !== norm(expect)) throw new Error('내용 불일치');
+        } catch (err) {
+            console.error('[Peek] 이전 실패:', id, err);
+            failures.push(`${id} (${err.message})`);
+        }
+        done++;
+        const el = document.getElementById('peek_data_size');
+        if (el) el.textContent = `이전 중... ${done}/${list.length}`;
+    }
+
+    updateDataSizeDisplay();
+
+    if (failures.length) {
+        toastr.error(`${failures.length}개 실패 — 기존 데이터는 그대로 뒀어. 콘솔 확인해줘`, EXT_NAME);
+        console.error('[Peek] 실패 목록:', failures);
+        return;
+    }
+
+    const cleanup = await Popup.show.confirm(
+        '이전 완료',
+        `<div style="text-align:left;">
+            <p><b>${list.length}개 전부 파일로 옮기고 검증까지 통과</b>했어.</p>
+            <p>이제 settings에 남은 옛 데이터(${kb.toFixed(0)}KB)를 지울까?</p>
+            <p style="font-size:0.85em;opacity:0.7;">지우면 settings.json이 그만큼 가벼워져. 백업 파일은 이미 받아놨고, 지워도 번역은 파일에서 그대로 읽혀.</p>
+        </div>`,
+    );
+
+    if (!cleanup) {
+        toastr.info('이전은 끝났어. 정리는 나중에 해도 돼', EXT_NAME);
+        return;
+    }
+
+    for (const section of Object.keys(BACKUP_SECTIONS)) {
+        delete extension_settings[EXT_ID][section];
+    }
+    settings.legacyTombstones = {};
+    saveSettingsDebounced();
+    updateDataSizeDisplay();
+    toastr.success(`정리 완료 — settings에서 ${kb.toFixed(0)}KB 줄었어`, EXT_NAME);
 }
 
 /**
@@ -1514,9 +2017,23 @@ function updateDataSizeDisplay() {
     const el = document.getElementById('peek_data_size');
     if (!el) return;
     const settings = loadSettings();
-    const kb = getPeekDataSizeKB();
-    const chars = Object.keys(settings.translations || {}).length;
-    el.textContent = `저장된 데이터: 캐릭터 ${chars}명 · ${kb.toFixed(1)}KB`;
+    const fileCount = Object.keys(settings.fileIndex || {}).length;
+    const legacyKB = legacySizeKB();
+    const settingsKB = JSON.stringify(settings).length / 1024;
+
+    let text = `파일 ${fileCount}개 · settings 사용량 ${settingsKB.toFixed(1)}KB`;
+    if (storageFailed) text += ' · ⚠ 레거시 모드(파일 저장 불가)';
+    el.textContent = text;
+
+    const migrateBtn = document.getElementById('peek_migrate_btn');
+    if (migrateBtn) {
+        if (legacyKB > 1) {
+            migrateBtn.style.display = '';
+            migrateBtn.innerHTML = `<i class="fa-solid fa-right-left"></i> 기존 데이터 이전 (${legacyKB.toFixed(0)}KB)`;
+        } else {
+            migrateBtn.style.display = 'none';
+        }
+    }
 }
 
 /**
@@ -1570,7 +2087,7 @@ function renderSettingsPanel() {
                         <hr class="peek-divider">
 
                         <label><b>데이터 백업</b></label>
-                        <small style="opacity:0.75;">번역·수동번역·메모를 파일로 내보내고 다시 불러올 수 있어. 확장 업데이트 전에 한 번 받아두면 안전해.</small>
+                        <small style="opacity:0.75;">번역 데이터는 <code>/user/files</code>에 캐릭터별 파일로 저장돼. 언제든 통째로 내보내고 불러올 수 있어.</small>
                         <div class="peek-data-size" id="peek_data_size"></div>
                         <div class="peek-data-buttons">
                             <div class="menu_button" id="peek_export_btn" title="현재 데이터를 JSON 파일로 저장">
@@ -1580,6 +2097,11 @@ function renderSettingsPanel() {
                                 <i class="fa-solid fa-upload"></i> 가져오기
                             </div>
                             <input type="file" id="peek_import_file" accept=".json,application/json" style="display:none;">
+                        </div>
+                        <div class="peek-data-buttons">
+                            <div class="menu_button" id="peek_migrate_btn" style="display:none;" title="settings에 남은 옛 데이터를 파일로 옮기고 정리">
+                                <i class="fa-solid fa-right-left"></i> 기존 데이터 이전
+                            </div>
                         </div>
                         <label class="peek-field-checkbox" title="켜면 파일 내용이 기존 데이터를 덮어써">
                             <input type="checkbox" id="peek_import_overwrite">
@@ -1657,7 +2179,7 @@ function bindSettingsEvents() {
     // === 데이터 백업 ===
     const exportBtn = document.getElementById('peek_export_btn');
     if (exportBtn) {
-        exportBtn.addEventListener('click', () => exportPeekData());
+        exportBtn.addEventListener('click', () => { exportPeekData(); });
     }
 
     const importBtn = document.getElementById('peek_import_btn');
@@ -1673,6 +2195,18 @@ function bindSettingsEvents() {
             const overwrite = document.getElementById('peek_import_overwrite')?.checked || false;
             await importPeekData(file, overwrite);
             e.target.value = '';
+        });
+    }
+
+    const migrateBtn = document.getElementById('peek_migrate_btn');
+    if (migrateBtn) {
+        migrateBtn.addEventListener('click', async () => {
+            migrateBtn.classList.add('disabled');
+            try {
+                await migrateLegacyToFiles();
+            } finally {
+                migrateBtn.classList.remove('disabled');
+            }
         });
     }
 
@@ -1762,6 +2296,11 @@ jQuery(async () => {
               }).join('');
         select.innerHTML = newOptions;
     });
+
+    // 자주 쓰는 캐릭터만 유휴 시점에 미리 로드 (동시 3건) — 부팅 부하 최소화
+    setTimeout(() => {
+        preloadRecent(20).catch(err => console.warn('[Peek] 프리로드 실패:', err));
+    }, 4000);
 
     console.log(`[${EXT_NAME}] 로드 완료`);
 });
