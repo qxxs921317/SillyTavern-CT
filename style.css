@@ -515,3 +515,29 @@
     border-color: var(--SmartThemeQuoteColor, #4a7) !important;
     background: var(--white30a) !important;
 }
+
+/* === 데이터 백업 UI === */
+.peek-divider {
+    border: none;
+    border-top: 1px solid var(--white20a);
+    margin: 12px 0 10px;
+}
+
+.peek-data-size {
+    font-size: 0.85em;
+    opacity: 0.7;
+    margin: 6px 0;
+}
+
+.peek-data-buttons {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 4px;
+}
+
+.peek-data-buttons .menu_button {
+    flex: 1 1 auto;
+    min-width: 110px;
+    margin: 0;
+}

@@ -1283,6 +1283,242 @@ async function copyTextWithFeedback(text, btn) {
     }
 }
 
+/* ===================================================================
+ * 데이터 백업 / 복원
+ * 저장 구조를 바꾸기 전에 유저가 스스로 데이터를 지킬 수 있게 하는 안전망.
+ * 여기서는 settings 구조를 일절 안 바꿈 — 읽고 쓰기만 함.
+ * =================================================================== */
+
+// 백업 대상 섹션과 중첩 깊이
+// translations: { [avatarKey]: { [fieldKey]: {...} } }  → 2단계
+// 나머지:        { [key]: {...} }                        → 1단계
+const BACKUP_SECTIONS = {
+    translations: 2,
+    personaTranslations: 1,
+    manualTranslations: 1,
+    personaManualTranslations: 1,
+    notes: 1,
+    personaNotes: 1,
+};
+
+const BACKUP_FORMAT = 'peek-backup';
+
+/**
+ * 백업 대상 데이터만 추린 크기(KB)
+ */
+function getPeekDataSizeKB() {
+    const settings = loadSettings();
+    const payload = {};
+    for (const key of Object.keys(BACKUP_SECTIONS)) {
+        payload[key] = settings[key] || {};
+    }
+    return JSON.stringify(payload).length / 1024;
+}
+
+/**
+ * 섹션별 항목 수 세기
+ */
+function countSection(obj, depth) {
+    if (!obj || typeof obj !== 'object') return 0;
+    if (depth === 1) return Object.keys(obj).length;
+    return Object.values(obj).reduce(
+        (n, v) => n + (v && typeof v === 'object' ? Object.keys(v).length : 0),
+        0,
+    );
+}
+
+/**
+ * 현재 데이터로 백업 객체 만들기
+ */
+function buildBackupObject() {
+    const settings = loadSettings();
+    const data = {};
+    for (const key of Object.keys(BACKUP_SECTIONS)) {
+        data[key] = structuredClone(settings[key] || {});
+    }
+    return {
+        format: BACKUP_FORMAT,
+        formatVersion: 1,
+        exportedAt: new Date().toISOString(),
+        data,
+    };
+}
+
+/**
+ * 타임스탬프 문자열 (파일명용)
+ */
+function backupTimestamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+/**
+ * JSON 파일로 다운로드
+ */
+function downloadJson(obj, filename) {
+    const json = JSON.stringify(obj, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/**
+ * 내보내기
+ */
+function exportPeekData(silent = false, suffix = '') {
+    try {
+        const backup = buildBackupObject();
+        const name = `peek-backup-${backupTimestamp()}${suffix}.json`;
+        downloadJson(backup, name);
+        if (!silent) {
+            const chars = Object.keys(backup.data.translations || {}).length;
+            toastr.success(`백업 저장됨 (캐릭터 ${chars}명, ${getPeekDataSizeKB().toFixed(0)}KB)`, EXT_NAME);
+        }
+        return true;
+    } catch (err) {
+        console.error('[Peek] 내보내기 실패:', err);
+        toastr.error('내보내기 실패: ' + err.message, EXT_NAME);
+        return false;
+    }
+}
+
+/**
+ * 섹션 병합
+ * overwrite=false면 기존 항목은 절대 안 건드리고 없는 것만 추가
+ */
+function mergeSection(target, source, depth, overwrite, stats) {
+    for (const [key, val] of Object.entries(source || {})) {
+        if (val === null || typeof val !== 'object') continue;
+        if (depth === 2) {
+            if (!target[key] || typeof target[key] !== 'object') target[key] = {};
+            mergeSection(target[key], val, 1, overwrite, stats);
+        } else if (target[key] === undefined) {
+            target[key] = structuredClone(val);
+            stats.added++;
+        } else if (overwrite) {
+            target[key] = structuredClone(val);
+            stats.replaced++;
+        } else {
+            stats.skipped++;
+        }
+    }
+}
+
+/**
+ * 백업 파일 파싱 + 검증
+ */
+function parseBackup(text) {
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch {
+        throw new Error('JSON 파싱 실패 — 올바른 백업 파일이 아니야');
+    }
+    if (!parsed || typeof parsed !== 'object') {
+        throw new Error('내용이 비어있어');
+    }
+
+    // 정식 백업 파일
+    if (parsed.format === BACKUP_FORMAT && parsed.data) {
+        return parsed.data;
+    }
+    // 관대한 폴백: extension_settings.peek 를 통째로 덤프한 경우도 받아줌
+    const hasSection = Object.keys(BACKUP_SECTIONS).some(k => parsed[k] && typeof parsed[k] === 'object');
+    if (hasSection) {
+        return parsed;
+    }
+    throw new Error('Peek 백업 파일이 아닌 것 같아');
+}
+
+/**
+ * 가져오기
+ */
+async function importPeekData(file, overwrite) {
+    let data;
+    try {
+        const text = await file.text();
+        data = parseBackup(text);
+    } catch (err) {
+        toastr.error(err.message, EXT_NAME);
+        return;
+    }
+
+    const charFields = countSection(data.translations, 2);
+    const charCount = Object.keys(data.translations || {}).length;
+    const personaCount = countSection(data.personaTranslations, 1);
+    const manualCount = countSection(data.manualTranslations, 1)
+        + countSection(data.personaManualTranslations, 1);
+    const noteCount = countSection(data.notes, 1) + countSection(data.personaNotes, 1);
+
+    const modeText = overwrite
+        ? '<b style="color:var(--warning,#e8a33d);">덮어쓰기</b> — 같은 키가 있으면 파일 내용으로 교체돼'
+        : '<b>병합</b> — 기존 항목은 그대로 두고 없는 것만 추가돼';
+
+    const confirmed = await Popup.show.confirm(
+        '데이터 가져오기',
+        `<div style="text-align:left;">
+            <p>이 백업을 불러올까?</p>
+            <pre style="white-space:pre-wrap;font-size:0.9em;opacity:0.85;margin:8px 0;">• 캐릭터 번역: ${charCount}명 / ${charFields}개 필드
+• 페르소나 번역: ${personaCount}개
+• 수동 번역: ${manualCount}개
+• 메모: ${noteCount}개</pre>
+            <p style="font-size:0.9em;">모드: ${modeText}</p>
+            <p style="font-size:0.85em;opacity:0.7;">안전을 위해 <b>지금 상태를 먼저 파일로 자동 백업</b>한 다음 진행할게.</p>
+        </div>`,
+    );
+    if (!confirmed) return;
+
+    // 되돌릴 수 있게 현재 상태를 먼저 떨궈둠
+    const backedUp = exportPeekData(true, '-before-import');
+    if (!backedUp) {
+        toastr.error('사전 백업에 실패해서 가져오기를 중단했어', EXT_NAME);
+        return;
+    }
+
+    const settings = loadSettings();
+    const stats = { added: 0, replaced: 0, skipped: 0 };
+
+    for (const [key, depth] of Object.entries(BACKUP_SECTIONS)) {
+        if (!data[key] || typeof data[key] !== 'object') continue;
+        if (!settings[key] || typeof settings[key] !== 'object') settings[key] = {};
+        mergeSection(settings[key], data[key], depth, overwrite, stats);
+    }
+
+    saveSettingsDebounced();
+    updateDataSizeDisplay();
+
+    try {
+        renderTranslationPanel();
+        renderPersonaPanel();
+    } catch (err) {
+        console.warn('[Peek] 가져오기 후 패널 갱신 실패:', err);
+    }
+
+    const parts = [`추가 ${stats.added}`];
+    if (stats.replaced) parts.push(`교체 ${stats.replaced}`);
+    if (stats.skipped) parts.push(`유지 ${stats.skipped}`);
+    toastr.success(`가져오기 완료 (${parts.join(' · ')})`, EXT_NAME);
+}
+
+/**
+ * 데이터 용량 표시 갱신
+ */
+function updateDataSizeDisplay() {
+    const el = document.getElementById('peek_data_size');
+    if (!el) return;
+    const settings = loadSettings();
+    const kb = getPeekDataSizeKB();
+    const chars = Object.keys(settings.translations || {}).length;
+    el.textContent = `저장된 데이터: 캐릭터 ${chars}명 · ${kb.toFixed(1)}KB`;
+}
+
 /**
  * 확장 설정 패널 (Extensions 탭) UI 렌더링
  */
@@ -1330,6 +1566,25 @@ function renderSettingsPanel() {
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
 
                         <div class="peek-status" id="peek_status"></div>
+
+                        <hr class="peek-divider">
+
+                        <label><b>데이터 백업</b></label>
+                        <small style="opacity:0.75;">번역·수동번역·메모를 파일로 내보내고 다시 불러올 수 있어. 확장 업데이트 전에 한 번 받아두면 안전해.</small>
+                        <div class="peek-data-size" id="peek_data_size"></div>
+                        <div class="peek-data-buttons">
+                            <div class="menu_button" id="peek_export_btn" title="현재 데이터를 JSON 파일로 저장">
+                                <i class="fa-solid fa-download"></i> 내보내기
+                            </div>
+                            <div class="menu_button" id="peek_import_btn" title="백업 JSON 파일 불러오기">
+                                <i class="fa-solid fa-upload"></i> 가져오기
+                            </div>
+                            <input type="file" id="peek_import_file" accept=".json,application/json" style="display:none;">
+                        </div>
+                        <label class="peek-field-checkbox" title="켜면 파일 내용이 기존 데이터를 덮어써">
+                            <input type="checkbox" id="peek_import_overwrite">
+                            <span>가져올 때 덮어쓰기 <small style="opacity:0.6;">(끄면 없는 것만 추가)</small></span>
+                        </label>
                     </div>
                 </div>
             </div>
@@ -1398,6 +1653,30 @@ function bindSettingsEvents() {
             }
         });
     }
+
+    // === 데이터 백업 ===
+    const exportBtn = document.getElementById('peek_export_btn');
+    if (exportBtn) {
+        exportBtn.addEventListener('click', () => exportPeekData());
+    }
+
+    const importBtn = document.getElementById('peek_import_btn');
+    const importFile = document.getElementById('peek_import_file');
+    if (importBtn && importFile) {
+        importBtn.addEventListener('click', () => {
+            importFile.value = '';  // 같은 파일 다시 고를 수 있게
+            importFile.click();
+        });
+        importFile.addEventListener('change', async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            const overwrite = document.getElementById('peek_import_overwrite')?.checked || false;
+            await importPeekData(file, overwrite);
+            e.target.value = '';
+        });
+    }
+
+    updateDataSizeDisplay();
 }
 
 /**
