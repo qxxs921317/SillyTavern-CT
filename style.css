@@ -223,7 +223,7 @@
     white-space: pre-wrap;
     word-wrap: break-word;
     line-height: 1.5;
-    padding: 8px 30px 8px 12px;
+    padding: 8px 12px;
     background: transparent;
     border-left: 3px solid var(--SmartThemeQuoteColor, var(--white30a));
     border-radius: 0 4px 4px 0;
@@ -584,9 +584,31 @@
 }
 #peek_translation_panel .peek-edit-btn:hover,
 #peek_persona_panel .peek-edit-btn:hover { opacity: 1; }
-#peek_translation_panel .peek-field-content,
-#peek_persona_panel .peek-field-content { padding-right: 58px; }
-#peek_translation_panel .peek-field-label { padding-right: 54px; }
+/* 수정/복사는 헤더 한 줄에만 배치하고 본문에는 버튼용 여백을 두지 않는다. */
+.peek-field-header {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-height: 22px;
+    margin-bottom: 4px;
+}
+#peek_translation_panel .peek-field-header .peek-field-label {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+}
+.peek-field-tools { display: inline-flex; flex: 0 0 auto; gap: 4px; }
+#peek_translation_panel .peek-field-tools .peek-copy-btn,
+#peek_persona_panel .peek-field-tools .peek-copy-btn,
+#peek_translation_panel .peek-field-tools .peek-edit-btn,
+#peek_persona_panel .peek-field-tools .peek-edit-btn {
+    position: static;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 22px;
+}
 .peek-auto-textarea { width: 100%; min-height: 180px; resize: vertical; box-sizing: border-box; }
 .peek-editor-actions { display: flex; flex-direction: row; justify-content: flex-end; gap: 8px; }
 .peek-action-btn {

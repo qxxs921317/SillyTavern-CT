@@ -1924,12 +1924,22 @@ function bindAutoFieldEditor(block, kind, key, field, translation) {
     edit.title = '자동번역 수정';
     edit.setAttribute('aria-label', edit.title);
     edit.innerHTML = '<i class="fa-solid fa-pen"></i>';
-    block.append(edit);
+    // 버튼은 헤더에 모아 본문 전체 폭을 사용할 수 있게 한다.
+    const header = document.createElement('div');
+    header.className = 'peek-field-header';
+    const label = block.querySelector('.peek-field-label');
+    if (label) header.append(label);
+    const tools = document.createElement('div');
+    tools.className = 'peek-field-tools';
+    tools.append(edit, copy);
+    header.append(tools);
+    block.prepend(header);
     const showEditor = () => {
         const draft = autoEditDrafts.get(id);
         content.hidden = true;
         copy.hidden = true;
         edit.hidden = true;
+        header.hidden = !label;
         const editor = document.createElement('div');
         editor.className = 'peek-auto-editor';
         const textarea = document.createElement('textarea');
