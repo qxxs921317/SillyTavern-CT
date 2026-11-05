@@ -5,7 +5,7 @@
 
 import { extension_settings, getContext } from '../../../extensions.js';
 import { saveSettingsDebounced, eventSource, event_types, characters, this_chid, user_avatar, name1 } from '../../../../script.js';
-import { Popup } from '../../../popup.js';
+import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { power_user } from '../../../power-user.js';
 
 const EXT_ID = 'peek';
@@ -938,6 +938,7 @@ function renderPersonaPanel() {
                 <button class="peek-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
             </div>
         `;
+        bindAutoFieldEditor(autoContent.querySelector('.peek-field-block'), 'persona', persona.avatar, null, tr);
         const copyBtn = autoContent.querySelector('.peek-copy-btn');
         if (copyBtn) {
             copyBtn.addEventListener('click', (e) => {
@@ -1131,6 +1132,7 @@ function createPersonaPanelElement() {
         );
         if (!confirmed) return;
         if (tab === 'auto') {
+            clearAutoDrafts('persona', persona.avatar);
             delete peekData.personaTranslations[persona.avatar];
         } else {
             delete peekData.personaManualTranslations[persona.avatar];
@@ -1156,7 +1158,10 @@ function injectPersonaQuickButton() {
     if (!buttonsBlock) return;
 
     // 이미 있으면 스킵
-    if (buttonsBlock.querySelector('#peek_persona_quick_btn')) return;
+    if (buttonsBlock.querySelector('#peek_persona_quick_btn')) {
+        injectSearchButton(buttonsBlock.querySelector('#peek_persona_quick_btn'), 'persona');
+        return;
+    }
 
     const btn = document.createElement('div');
     btn.id = 'peek_persona_quick_btn';
@@ -1176,6 +1181,7 @@ function injectPersonaQuickButton() {
 
     // 마지막에 추가 (delete 버튼 뒤)
     buttonsBlock.appendChild(btn);
+    injectSearchButton(btn, 'persona');
 }
 
 /* ========== 캐릭터 카드 ========== */
@@ -1294,6 +1300,7 @@ function renderTranslationPanel() {
             const key = block.dataset.fieldKey;
             const btn = block.querySelector('.peek-copy-btn');
             const tr = charTranslations[key];
+            bindAutoFieldEditor(block, 'char', charKey, key, tr);
             if (btn && tr && tr.text) {
                 btn.addEventListener('click', (e) => {
                     e.stopPropagation();
@@ -1488,6 +1495,7 @@ function createPanelElement() {
         );
         if (!confirmed) return;
         if (tab === 'auto') {
+            clearAutoDrafts('char', charKey);
             delete peekData.translations[charKey];
         } else {
             delete peekData.manualTranslations[charKey];
@@ -1541,7 +1549,10 @@ function injectQuickButton() {
     if (!descDiv) return;
 
     // 이미 있으면 스킵
-    if (descDiv.querySelector('#peek_quick_btn')) return;
+    if (descDiv.querySelector('#peek_quick_btn')) {
+        injectSearchButton(descDiv.querySelector('#peek_quick_btn'), 'char');
+        return;
+    }
 
     // editor_maximize 아이콘 옆에 끼워넣기
     const maximizeIcon = descDiv.querySelector('.editor_maximize');
@@ -1565,6 +1576,277 @@ function injectQuickButton() {
 
     // editor_maximize 바로 뒤에 삽입
     maximizeIcon.parentNode.insertBefore(btn, maximizeIcon.nextSibling);
+    injectSearchButton(btn, 'char');
+}
+
+/* 저장된 자동번역 검색 — 검색 본문/편집 초안은 settings에 저장하지 않음. */
+function savedEntityName(kind, key) {
+    return kind === 'char'
+        ? characters.find(c => c?.avatar === key)?.name || key
+        : power_user?.personas?.[key] || key;
+}
+
+function currentEntityKey(kind) {
+    return kind === 'char' ? getCurrentCharKey() : getCurrentPersona()?.avatar;
+}
+
+function renderEntityPanel(kind) {
+    if (kind === 'char') renderTranslationPanel();
+    else renderPersonaPanel();
+}
+
+function showAutoTab(kind) {
+    const settings = loadSettings();
+    settings[kind === 'char' ? 'activeTab' : 'personaActiveTab'] = 'auto';
+    settings[kind === 'char' ? 'panelCollapsed' : 'personaPanelCollapsed'] = false;
+    saveSettingsDebounced();
+    renderEntityPanel(kind);
+}
+
+async function savedAutoEntries(kind) {
+    const entries = [];
+    let failed = 0;
+    const ids = allEntityIds().filter(id => id.startsWith(`${kind}:`));
+    for (let i = 0; i < ids.length; i += 4) {
+        await Promise.all(ids.slice(i, i + 4).map(async id => {
+            const key = id.slice(kind.length + 1);
+            let auto;
+            if (loadedEntities.has(id)) {
+                auto = peekData[SECTIONS[kind].auto][key];
+            } else {
+                const indexed = loadSettings().fileIndex?.[id];
+                if (indexed?.file && !storageFailed) {
+                    try {
+                        const data = await readEntityFile(indexed.file);
+                        if (!data || data.key !== key || data.kind !== kind) throw new Error('파일 정보 불일치');
+                        auto = data.auto;
+                    } catch (err) {
+                        failed++;
+                        console.warn('[Peek] 검색 중 파일 읽기 실패:', indexed.file, err);
+                        return;
+                    }
+                } else if (!loadSettings().legacyTombstones?.[id]) {
+                    auto = legacyEntityData(kind, key)?.auto;
+                }
+            }
+            const records = kind === 'char'
+                ? TRANSLATABLE_FIELDS.filter(f => auto?.[f.key]?.text).map(f => [f.label, auto[f.key].text])
+                : auto?.text ? [['Persona Description', auto.text]] : [];
+            if (records.length) entries.push({ key, name: savedEntityName(kind, key), auto: structuredClone(auto), records });
+        }));
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    return { entries, failed };
+}
+
+async function openTranslationSearch(kind) {
+    const targetKey = currentEntityKey(kind);
+    if (!targetKey) {
+        toastr.warning('먼저 캐릭터나 페르소나를 선택해줘.', EXT_NAME);
+        return;
+    }
+    const root = document.createElement('div');
+    root.className = 'peek-search';
+    root.innerHTML = `
+        <h3>저장된 ${kind === 'char' ? '캐릭터' : '페르소나'} 번역 불러오기</h3>
+        <p class="peek-search-target"></p>
+        <input class="text_pole peek-search-input" type="search" aria-label="저장된 번역 검색" placeholder="이름 · 파일명 · 번역 내용 검색" disabled>
+        <p class="peek-search-status" role="status" aria-live="polite">저장된 번역을 읽는 중...</p>
+        <div class="peek-search-results"></div>
+        <div class="peek-search-preview" hidden></div>
+        <button type="button" class="menu_button peek-search-load" disabled>선택한 번역 불러오기</button>`;
+    root.querySelector('.peek-search-target').textContent = `불러올 대상: ${savedEntityName(kind, targetKey)}`;
+    const popup = new Popup(root, POPUP_TYPE.TEXT, null, { okButton: '닫기', wide: true });
+    const closed = popup.show();
+    let disposed = false;
+    closed.then(() => { disposed = true; });
+    const input = root.querySelector('.peek-search-input');
+    const list = root.querySelector('.peek-search-results');
+    const preview = root.querySelector('.peek-search-preview');
+    const load = root.querySelector('.peek-search-load');
+    const status = root.querySelector('.peek-search-status');
+    let selected = null;
+    try {
+        const { entries, failed } = await savedAutoEntries(kind);
+        if (disposed) return;
+        const update = () => {
+            selected = null;
+            load.disabled = true;
+            preview.hidden = true;
+            preview.replaceChildren();
+            list.replaceChildren();
+            const query = input.value.trim().toLocaleLowerCase();
+            const matches = entries.filter(entry => [entry.name, entry.key, ...entry.records.flat()].join('\n').toLocaleLowerCase().includes(query));
+            status.textContent = `${matches.length}개 결과${failed ? ` · ${failed}개 파일을 읽지 못했어. 닫았다가 다시 시도해줘.` : ''}`;
+            if (!matches.length) {
+                list.textContent = entries.length ? '검색 결과가 없어.' : '저장된 자동번역이 없어.';
+            }
+            for (const entry of matches) {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.className = 'peek-search-result';
+                button.setAttribute('aria-pressed', 'false');
+                const title = document.createElement('strong');
+                title.textContent = entry.name;
+                const snippet = document.createElement('span');
+                snippet.textContent = `${entry.key} · ${entry.records.map(r => r[1]).join(' ').slice(0, 120)}`;
+                button.append(title, snippet);
+                button.addEventListener('click', () => {
+                    selected = entry;
+                    list.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b === button)));
+                    preview.replaceChildren();
+                    for (const [label, text] of entry.records) {
+                        const heading = document.createElement('h4');
+                        heading.textContent = label;
+                        const content = document.createElement('div');
+                        content.textContent = text;
+                        preview.append(heading, content);
+                    }
+                    preview.hidden = false;
+                    load.disabled = false;
+                });
+                list.append(button);
+            }
+        };
+        input.disabled = false;
+        input.addEventListener('input', update);
+        update();
+        input.focus();
+        load.addEventListener('click', async () => {
+            if (!selected || load.disabled) return;
+            load.disabled = true;
+            try {
+                if (currentEntityKey(kind) !== targetKey) {
+                    toastr.warning('선택 대상이 바뀌었어. 검색창을 다시 열어줘.', EXT_NAME);
+                    return;
+                }
+                await ensureEntity(kind, targetKey);
+                const section = SECTIONS[kind].auto;
+                const existing = peekData[section][targetKey];
+                if (existing && (kind === 'persona' ? existing.text : Object.keys(existing).length)) {
+                    const ok = await Popup.show.confirm('자동번역 덮어쓰기', '현재 대상의 자동번역을 선택한 결과로 바꿀까? 수동번역과 메모는 유지돼.');
+                    if (!ok) return;
+                }
+                if (disposed || currentEntityKey(kind) !== targetKey) return;
+                peekData[section][targetKey] = structuredClone(selected.auto);
+                clearAutoDrafts(kind, targetKey);
+                await persistEntity(kind, targetKey);
+                showAutoTab(kind);
+                await popup.complete(1);
+                toastr.success('자동번역을 불러왔어.', EXT_NAME);
+            } catch (err) {
+                toastr.error(`불러오기 실패: ${err.message}`, EXT_NAME);
+            } finally {
+                load.disabled = !selected;
+            }
+        });
+    } catch (err) {
+        if (!disposed) status.textContent = `검색 실패: ${err.message}`;
+    }
+    await closed;
+}
+
+function injectSearchButton(translationButton, kind) {
+    const id = kind === 'char' ? 'peek_search_btn' : 'peek_persona_search_btn';
+    if (document.getElementById(id)) return;
+    const button = document.createElement('button');
+    button.id = id;
+    button.type = 'button';
+    button.className = translationButton.className;
+    button.title = 'Peek: 저장된 번역 검색해서 불러오기';
+    button.setAttribute('aria-label', button.title);
+    button.textContent = '🔍';
+    button.addEventListener('click', e => {
+        e.stopPropagation();
+        openTranslationSearch(kind).catch(err => toastr.error(err.message, EXT_NAME));
+    });
+    translationButton.after(button);
+}
+
+// 패널 재렌더 중에도 편집 초안을 유지하되, settings에는 기록하지 않음.
+const autoEditDrafts = new Map();
+function clearAutoDrafts(kind, key) {
+    for (const [id, draft] of autoEditDrafts) {
+        if (draft.kind === kind && draft.key === key) autoEditDrafts.delete(id);
+    }
+}
+
+function bindAutoFieldEditor(block, kind, key, field, translation) {
+    const id = JSON.stringify([kind, key, field]);
+    const content = block.querySelector('.peek-field-content');
+    const copy = block.querySelector('.peek-copy-btn');
+    const edit = document.createElement('button');
+    edit.type = 'button';
+    edit.className = 'peek-edit-btn';
+    edit.title = '자동번역 수정';
+    edit.setAttribute('aria-label', edit.title);
+    edit.innerHTML = '<i class="fa-solid fa-pen"></i>';
+    block.append(edit);
+    const showEditor = () => {
+        const draft = autoEditDrafts.get(id);
+        content.hidden = true;
+        copy.hidden = true;
+        edit.hidden = true;
+        const editor = document.createElement('div');
+        editor.className = 'peek-auto-editor';
+        const textarea = document.createElement('textarea');
+        textarea.className = 'text_pole peek-auto-textarea';
+        textarea.setAttribute('aria-label', '자동번역 수정 내용');
+        textarea.value = draft.text;
+        textarea.addEventListener('input', () => { draft.text = textarea.value; });
+        const actions = document.createElement('div');
+        actions.className = 'peek-editor-actions';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'menu_button peek-auto-save';
+        save.textContent = '저장';
+        const cancel = document.createElement('button');
+        cancel.type = 'button';
+        cancel.className = 'menu_button peek-auto-cancel';
+        cancel.textContent = '취소';
+        cancel.addEventListener('click', () => {
+            autoEditDrafts.delete(id);
+            renderEntityPanel(kind);
+        });
+        save.addEventListener('click', async () => {
+            if (!textarea.value.trim()) {
+                toastr.warning('번역 내용을 입력해줘. 삭제는 패널의 지우기를 사용해줘.', EXT_NAME);
+                return;
+            }
+            save.disabled = true;
+            cancel.disabled = true;
+            try {
+                const auto = peekData[SECTIONS[kind].auto][key];
+                const current = kind === 'char' ? auto?.[field] : auto;
+                if (current !== draft.original) {
+                    toastr.warning('번역이 변경됐어. 취소한 뒤 다시 수정해줘.', EXT_NAME);
+                    return;
+                }
+                const updated = { ...current, text: textarea.value, updatedAt: Date.now() };
+                if (kind === 'char') auto[field] = updated;
+                else peekData.personaTranslations[key] = updated;
+                await persistEntity(kind, key);
+                autoEditDrafts.delete(id);
+                renderEntityPanel(kind);
+                toastr.success('수정한 자동번역을 저장했어.', EXT_NAME);
+            } catch (err) {
+                toastr.error(`저장 실패: ${err.message}`, EXT_NAME);
+            } finally {
+                save.disabled = false;
+                cancel.disabled = false;
+            }
+        });
+        actions.append(save, cancel);
+        editor.append(textarea, actions);
+        block.append(editor);
+    };
+    edit.addEventListener('click', e => {
+        e.stopPropagation();
+        autoEditDrafts.set(id, { kind, key, text: translation.text, original: translation });
+        showEditor();
+        block.querySelector('textarea').focus();
+    });
+    if (autoEditDrafts.has(id)) showEditor();
 }
 
 /**
