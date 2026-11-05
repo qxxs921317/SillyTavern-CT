@@ -550,7 +550,19 @@
 
 /* 저장된 번역 검색 / 자동번역 수정 */
 .peek-search { text-align: left; }
-.peek-search-input { width: 100%; }
+.peek-search .peek-search-input {
+    appearance: none;
+    box-sizing: border-box;
+    width: 100%;
+    padding: 8px 10px;
+    background: var(--black30a, rgba(0, 0, 0, 0.3));
+    color: var(--SmartThemeBodyColor, inherit);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    font: inherit;
+}
+.peek-search .peek-search-input::placeholder { color: inherit; opacity: 0.55; }
+.peek-search .peek-search-input:focus-visible { outline: 2px solid var(--SmartThemeQuoteColor); outline-offset: 1px; }
 .peek-search-status, .peek-search-target { font-size: 0.9em; opacity: 0.8; }
 .peek-search-results { display: flex; flex-direction: column; gap: 6px; max-height: 30vh; overflow-y: auto; }
 .peek-search-result {
@@ -562,7 +574,7 @@
 .peek-search-result span { font-size: 0.85em; opacity: 0.75; }
 .peek-search-result[aria-pressed="true"] { border-color: var(--SmartThemeQuoteColor, #66c); background: var(--white20a); }
 .peek-search-preview { max-height: 30vh; overflow: auto; margin: 12px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
-.peek-search-load { margin-top: 12px; }
+.peek-search-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
 .peek-search button:disabled { opacity: 0.45; cursor: default; }
 #peek_translation_panel .peek-edit-btn,
 #peek_persona_panel .peek-edit-btn {
@@ -576,5 +588,48 @@
 #peek_persona_panel .peek-field-content { padding-right: 58px; }
 #peek_translation_panel .peek-field-label { padding-right: 54px; }
 .peek-auto-textarea { width: 100%; min-height: 180px; resize: vertical; box-sizing: border-box; }
-.peek-editor-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.peek-editor-actions { display: flex; flex-direction: row; justify-content: flex-end; gap: 8px; }
+.peek-action-btn {
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    min-width: max-content;
+    height: auto;
+    padding: 5px 12px;
+    margin: 0;
+    white-space: nowrap;
+    writing-mode: horizontal-tb;
+    font: inherit;
+    font-size: 0.9em;
+    color: var(--SmartThemeBodyColor, inherit);
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+    cursor: pointer;
+}
+.peek-action-btn:hover { background: var(--white20a); }
+.peek-action-btn:disabled { opacity: 0.45; cursor: default; }
+.peek-action-btn[hidden] { display: none; }
+/* 캐릭터 돋보기만 번역 아이콘과 같은 테두리 없는 모양으로. */
+#peek_search_btn {
+    appearance: none;
+    display: inline-flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: auto;
+    min-width: 0;
+    height: auto;
+    padding: 0 4px;
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    color: inherit;
+    font: inherit;
+    line-height: 1;
+}
 .peek-field-block [hidden] { display: none !important; }

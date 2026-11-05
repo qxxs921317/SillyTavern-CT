@@ -1,0 +1,127 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import vm from 'node:vm';
+
+// Execute the real storage functions without starting the SillyTavern UI.
+const source = (await readFile(new URL('../index.js', import.meta.url), 'utf8'))
+    .replace(/^import .*;\r?$/gm, '');
+const clone = value => JSON.parse(JSON.stringify(value));
+
+function harness() {
+    const files = new Map();
+    const settings = {};
+    let fail = () => false;
+    const context = vm.createContext({
+        structuredClone, TextEncoder, btoa, setTimeout, clearTimeout,
+        extension_settings: settings,
+        jQuery: () => {},
+        getContext: () => ({ getRequestHeaders: () => ({ 'Content-Type': 'application/json' }) }),
+        saveSettingsDebounced: () => {},
+        toastr: { warning() {}, error() {}, success() {} },
+        console: { warn() {}, error() {}, log() {} },
+        fetch: async (url, options = {}) => {
+            const payload = options.body ? JSON.parse(options.body) : null;
+            if (fail(url, payload)) return new Response('Storage unavailable', { status: 503 });
+            if (url === '/api/files/upload') {
+                files.set(payload.name, JSON.parse(Buffer.from(payload.data, 'base64').toString('utf8')));
+                return Response.json({ path: `/user/files/${payload.name}` });
+            }
+            if (url === '/api/files/delete') {
+                const found = files.delete(payload.path.replace('/user/files/', ''));
+                return new Response(null, { status: found ? 200 : 404 });
+            }
+            const value = files.get(url.replace('/user/files/', ''));
+            return value ? Response.json(value) : new Response(null, { status: 404 });
+        },
+    });
+    vm.runInContext(`${source}\n globalThis.storage = {
+        loadSettings, applyEntityData, collectEntityData, persistEntity, replaceAutoWithUndo,
+        undoAutoImport, readUndoBackup, undoFileName, entityFileName,
+        clearCache: () => undoBackups.clear(),
+    };`, context);
+    const storage = context.storage;
+    storage.loadSettings();
+    return { storage, files, settings, failWhen: predicate => { fail = predicate; } };
+}
+
+async function seed(h, kind, auto, { manual = { text: 'manual' }, note = { text: 'note' } } = {}) {
+    h.storage.applyEntityData(kind, 'target.png', { auto, manual, note });
+    await h.storage.persistEntity(kind, 'target.png');
+}
+
+for (const kind of ['char', 'persona']) {
+    test(`${kind}: undo survives cache reset and preserves manual translation and notes`, async () => {
+        const h = harness();
+        const before = kind === 'char'
+            ? { description: { text: 'before', translatedAt: 1 }, personality: { text: 'calm' } }
+            : { text: 'before', translatedAt: 1 };
+        const after = kind === 'char' ? { description: { text: 'after' } } : { text: 'after' };
+        await seed(h, kind, before);
+        await h.storage.replaceAutoWithUndo(kind, 'target.png', after);
+        h.storage.clearCache();
+        assert.deepEqual(clone((await h.storage.readUndoBackup(kind, 'target.png')).auto), before);
+        await h.storage.undoAutoImport(kind, 'target.png');
+        const saved = h.files.get(h.storage.entityFileName(kind, 'target.png'));
+        assert.deepEqual(saved.auto, before);
+        assert.deepEqual(saved.manual, { text: 'manual' });
+        assert.deepEqual(saved.note, { text: 'note' });
+        assert.equal(h.files.has(h.storage.undoFileName(kind, 'target.png')), false);
+        assert.equal(h.settings.peek.translations, undefined);
+        assert.equal(h.settings.peek.personaTranslations, undefined);
+        assert.equal(Object.keys(h.settings.peek).some(key => /undo/i.test(key)), false);
+    });
+}
+
+test('undo restores an initially empty automatic translation', async () => {
+    const h = harness();
+    await seed(h, 'persona', null, { manual: null, note: null });
+    await h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'imported' });
+    await h.storage.undoAutoImport('persona', 'target.png');
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto, null);
+    assert.equal(h.files.size, 0);
+});
+
+test('a failed backup prevents replacement', async () => {
+    const h = harness();
+    await seed(h, 'persona', { text: 'before' });
+    h.failWhen((url, data) => url === '/api/files/upload' && data.name.startsWith('peek_undo_'));
+    await assert.rejects(h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'after' }));
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'before');
+    assert.equal(h.files.get(h.storage.entityFileName('persona', 'target.png')).auto.text, 'before');
+});
+
+test('a failed import restores current data and the previous undo point', async () => {
+    const h = harness();
+    await seed(h, 'persona', { text: 'original' });
+    await h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'first import' });
+    h.failWhen((url, data) => url === '/api/files/upload' && !data.name.startsWith('peek_undo_'));
+    await assert.rejects(h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'failed import' }));
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'first import');
+    assert.equal(h.files.get(h.storage.undoFileName('persona', 'target.png')).auto.text, 'original');
+    h.failWhen(() => false);
+    await h.storage.undoAutoImport('persona', 'target.png');
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'original');
+});
+
+test('failed undo keeps its backup and can be retried', async () => {
+    const h = harness();
+    await seed(h, 'persona', { text: 'original' });
+    await h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'imported' });
+    h.failWhen((url, data) => url === '/api/files/upload' && !data.name.startsWith('peek_undo_'));
+    await assert.rejects(h.storage.undoAutoImport('persona', 'target.png'));
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'imported');
+    assert.equal(h.files.has(h.storage.undoFileName('persona', 'target.png')), true);
+    h.failWhen(() => false);
+    await h.storage.undoAutoImport('persona', 'target.png');
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'original');
+});
+
+test('each import stores the immediately preceding translation', async () => {
+    const h = harness();
+    await seed(h, 'persona', { text: 'original' });
+    await h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'first' });
+    await h.storage.replaceAutoWithUndo('persona', 'target.png', { text: 'second' });
+    await h.storage.undoAutoImport('persona', 'target.png');
+    assert.equal(h.storage.collectEntityData('persona', 'target.png').auto.text, 'first');
+});

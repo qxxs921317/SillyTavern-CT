@@ -279,47 +279,50 @@ function schedulePersist(kind, key, delay = 700) {
  */
 async function persistEntity(kind, key) {
     if (!key || !SECTIONS[kind]) return;
+    return queueEntityWrite(kind, key, async () => {
+        loadedEntities.add(entityId(kind, key));
+        if (storageFailed) {
+            persistLegacy(kind, key);
+            return;
+        }
+        try {
+            await persistEntityFile(kind, key);
+        } catch (err) {
+            console.error('[Peek] 파일 저장 실패 — 레거시 모드로 전환:', err);
+            storageFailed = true;
+            loadSettings().storageMode = 'legacy';
+            if (!storageWarned) {
+                storageWarned = true;
+                toastr.warning('파일 저장에 실패해서 기존 방식(설정 저장)으로 전환했어. 데이터는 안 날아가.', EXT_NAME);
+            }
+            persistLegacy(kind, key);
+        }
+    });
+}
+
+async function persistEntityFile(kind, key) {
     const id = entityId(kind, key);
-    loadedEntities.add(id);
-
-    if (storageFailed) {
-        persistLegacy(kind, key);
-        return;
-    }
-
     const settings = loadSettings();
     const payload = collectEntityData(kind, key);
     const fileName = entityFileName(kind, key);
-
-    try {
-        if (isEntityEmpty(payload)) {
-            if (settings.fileIndex?.[id]) {
-                await removeEntityFile(settings.fileIndex[id].file);
-                delete settings.fileIndex[id];
-            }
-            // 레거시에 같은 키가 남아있으면 다음 로드 때 되살아나므로 묘비 표시
-            if (legacyEntityData(kind, key)) {
-                if (!settings.legacyTombstones) settings.legacyTombstones = {};
-                settings.legacyTombstones[id] = true;
-            }
-            saveSettingsDebounced();
-            return;
+    if (isEntityEmpty(payload)) {
+        if (settings.fileIndex?.[id]) {
+            if (!await removeEntityFile(settings.fileIndex[id].file)) throw new Error('기존 파일을 지우지 못했어.');
+            delete settings.fileIndex[id];
         }
-        await writeEntityFile(fileName, payload);
-        if (!settings.fileIndex) settings.fileIndex = {};
-        settings.fileIndex[id] = { file: fileName, updatedAt: payload.updatedAt };
-        settings.storageMode = 'file';
+        // 레거시에 같은 키가 남아있으면 다음 로드 때 되살아나므로 묘비 표시
+        if (legacyEntityData(kind, key)) {
+            if (!settings.legacyTombstones) settings.legacyTombstones = {};
+            settings.legacyTombstones[id] = true;
+        }
         saveSettingsDebounced();
-    } catch (err) {
-        console.error('[Peek] 파일 저장 실패 — 레거시 모드로 전환:', err);
-        storageFailed = true;
-        loadSettings().storageMode = 'legacy';
-        if (!storageWarned) {
-            storageWarned = true;
-            toastr.warning('파일 저장에 실패해서 기존 방식(설정 저장)으로 전환했어. 데이터는 안 날아가.', EXT_NAME);
-        }
-        persistLegacy(kind, key);
+        return;
     }
+    await writeEntityFile(fileName, payload);
+    if (!settings.fileIndex) settings.fileIndex = {};
+    settings.fileIndex[id] = { file: fileName, updatedAt: payload.updatedAt };
+    settings.storageMode = 'file';
+    saveSettingsDebounced();
 }
 
 /**
@@ -971,6 +974,8 @@ function renderPersonaPanel() {
         }
     }
 
+    renderUndoControl(panel, 'persona', persona.avatar);
+
     // 메모 패널
     renderPersonaNotesPanel(panel, persona.avatar);
 }
@@ -1335,6 +1340,8 @@ function renderTranslationPanel() {
         }
     }
 
+    renderUndoControl(panel, 'char', charKey);
+
     // 메모 패널도 같이 렌더
     renderCharNotesPanel(panel, charKey);
 }
@@ -1650,11 +1657,11 @@ async function openTranslationSearch(kind) {
     root.innerHTML = `
         <h3>저장된 ${kind === 'char' ? '캐릭터' : '페르소나'} 번역 불러오기</h3>
         <p class="peek-search-target"></p>
-        <input class="text_pole peek-search-input" type="search" aria-label="저장된 번역 검색" placeholder="이름 · 파일명 · 번역 내용 검색" disabled>
+        <input class="text_pole peek-search-input" type="text" inputmode="search" aria-label="저장된 번역 검색" placeholder="이름 · 파일명 · 번역 내용 검색" disabled>
         <p class="peek-search-status" role="status" aria-live="polite">저장된 번역을 읽는 중...</p>
         <div class="peek-search-results"></div>
         <div class="peek-search-preview" hidden></div>
-        <button type="button" class="menu_button peek-search-load" disabled>선택한 번역 불러오기</button>`;
+        <div class="peek-search-actions"><button type="button" class="peek-action-btn peek-search-load" disabled>불러오기</button></div>`;
     root.querySelector('.peek-search-target').textContent = `불러올 대상: ${savedEntityName(kind, targetKey)}`;
     const popup = new Popup(root, POPUP_TYPE.TEXT, null, { okButton: '닫기', wide: true });
     const closed = popup.show();
@@ -1724,16 +1731,14 @@ async function openTranslationSearch(kind) {
                 const section = SECTIONS[kind].auto;
                 const existing = peekData[section][targetKey];
                 if (existing && (kind === 'persona' ? existing.text : Object.keys(existing).length)) {
-                    const ok = await Popup.show.confirm('자동번역 덮어쓰기', '현재 대상의 자동번역을 선택한 결과로 바꿀까? 수동번역과 메모는 유지돼.');
+                    const ok = await Popup.show.confirm('자동번역 덮어쓰기', '현재 대상의 자동번역을 선택한 결과로 바꿀까? 직전 내용은 되돌리기로 복원할 수 있어. 수동번역과 메모는 유지돼.');
                     if (!ok) return;
                 }
                 if (disposed || currentEntityKey(kind) !== targetKey) return;
-                peekData[section][targetKey] = structuredClone(selected.auto);
-                clearAutoDrafts(kind, targetKey);
-                await persistEntity(kind, targetKey);
+                await replaceAutoWithUndo(kind, targetKey, selected.auto);
                 showAutoTab(kind);
                 await popup.complete(1);
-                toastr.success('자동번역을 불러왔어.', EXT_NAME);
+                toastr.success('자동번역을 불러왔어. 패널의 되돌리기로 복원할 수 있어.', EXT_NAME);
             } catch (err) {
                 toastr.error(`불러오기 실패: ${err.message}`, EXT_NAME);
             } finally {
@@ -1761,6 +1766,144 @@ function injectSearchButton(translationButton, kind) {
         openTranslationSearch(kind).catch(err => toastr.error(err.message, EXT_NAME));
     });
     translationButton.after(button);
+}
+
+// 불러오기 직전의 자동번역 한 단계만 별도 파일에 보관한다.
+const undoBackups = new Map();
+const entityWriteQueues = new Map();
+
+function queueEntityWrite(kind, key, operation) {
+    const id = entityId(kind, key);
+    const previous = entityWriteQueues.get(id) || Promise.resolve();
+    const next = previous.catch(() => {}).then(operation);
+    entityWriteQueues.set(id, next);
+    const cleanup = () => {
+        if (entityWriteQueues.get(id) === next) entityWriteQueues.delete(id);
+    };
+    next.then(cleanup, cleanup);
+    return next;
+}
+
+function undoFileName(kind, key) {
+    return `peek_undo_${kind === 'char' ? 'c' : 'p'}_${keyHash(key)}.json`;
+}
+
+async function readUndoBackup(kind, key) {
+    const id = entityId(kind, key);
+    if (undoBackups.has(id)) return undoBackups.get(id);
+    const pending = (async () => {
+        const data = await readEntityFile(undoFileName(kind, key));
+        if (data && (data.v !== 1 || data.kind !== kind || data.key !== key || !Object.hasOwn(data, 'auto'))) {
+            throw new Error('되돌리기 파일 정보가 맞지 않아.');
+        }
+        return data;
+    })();
+    undoBackups.set(id, pending);
+    try {
+        const data = await pending;
+        if (undoBackups.get(id) === pending) undoBackups.set(id, data);
+        return data;
+    } catch (err) {
+        if (undoBackups.get(id) === pending) undoBackups.delete(id);
+        throw err;
+    }
+}
+
+async function replaceAutoWithUndo(kind, key, auto) {
+    return queueEntityWrite(kind, key, async () => {
+        if (storageFailed) throw new Error('파일 저장을 사용할 수 없어. 연결을 확인하고 새로고침해줘.');
+        const section = SECTIONS[kind].auto;
+        const previous = peekData[section][key];
+        const priorBackup = await readUndoBackup(kind, key);
+        const backup = { v: 1, kind, key, auto: structuredClone(previous ?? null), savedAt: Date.now() };
+        // 백업 저장에 실패하면 현재 번역을 바꾸지 않는다.
+        await writeEntityFile(undoFileName(kind, key), backup);
+        undoBackups.set(entityId(kind, key), backup);
+        peekData[section][key] = structuredClone(auto);
+        try {
+            // 불러오기는 파일 저장 성공을 확인한 뒤에만 완료한다.
+            await persistEntityFile(kind, key);
+        } catch (err) {
+            if (previous === undefined) delete peekData[section][key];
+            else peekData[section][key] = previous;
+            try {
+                if (priorBackup) await writeEntityFile(undoFileName(kind, key), priorBackup);
+                else if (!await removeEntityFile(undoFileName(kind, key))) throw new Error('백업 정리 실패');
+                undoBackups.set(entityId(kind, key), priorBackup);
+            } catch (backupError) {
+                // 새 백업에도 불러오기 전 현재 번역은 보존돼 있다.
+                console.warn('[Peek] 이전 되돌리기 지점 복구 실패:', backupError);
+                toastr.warning('현재 번역은 유지됐지만 이전 되돌리기 지점을 복구하지 못했어. 새 백업에는 현재 번역이 보관돼 있어.', EXT_NAME);
+            }
+            throw err;
+        }
+        clearAutoDrafts(kind, key);
+    });
+}
+
+async function undoAutoImport(kind, key) {
+    return queueEntityWrite(kind, key, async () => {
+        const backup = await readUndoBackup(kind, key);
+        if (!backup) throw new Error('되돌릴 번역이 없어.');
+        const section = SECTIONS[kind].auto;
+        const current = peekData[section][key];
+        if (backup.auto === null) delete peekData[section][key];
+        else peekData[section][key] = structuredClone(backup.auto);
+        try {
+            await persistEntityFile(kind, key);
+        } catch (err) {
+            if (current === undefined) delete peekData[section][key];
+            else peekData[section][key] = current;
+            throw err;
+        }
+        clearAutoDrafts(kind, key);
+        // 복원 저장이 끝난 뒤 백업을 소비한다. 삭제 실패 시 재시도가 가능하도록 남긴다.
+        if (await removeEntityFile(undoFileName(kind, key)).catch(() => false)) {
+            undoBackups.set(entityId(kind, key), null);
+        } else {
+            toastr.warning('번역은 복원됐지만 되돌리기 파일 정리에 실패했어. 다시 시도할 수 있어.', EXT_NAME);
+        }
+    });
+}
+
+function renderUndoControl(panel, kind, key) {
+    const footer = panel.querySelector('.peek-footer-actions');
+    const id = entityId(kind, key);
+    panel.dataset.peekUndoKey = id;
+    footer.querySelector('.peek-undo-btn')?.remove();
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'peek-action-btn peek-undo-btn';
+    button.textContent = '되돌리기';
+    button.title = '마지막 불러오기 직전의 자동번역으로 복원';
+    button.hidden = true;
+    footer.prepend(button);
+    readUndoBackup(kind, key).then(() => {
+        if (panel.dataset.peekUndoKey === id && button.isConnected) {
+            Promise.resolve(undoBackups.get(id)).then(data => { button.hidden = !data; });
+        }
+    }).catch(err => {
+        if (panel.dataset.peekUndoKey === id && button.isConnected) {
+            button.hidden = false;
+            button.title = `되돌리기 파일 확인 실패: ${err.message}. 눌러서 다시 시도`;
+        }
+    });
+    button.addEventListener('click', async e => {
+        e.stopPropagation();
+        if (button.disabled) return;
+        button.disabled = true;
+        try {
+            const confirmed = await Popup.show.confirm('번역 되돌리기', '마지막 불러오기 직전의 자동번역으로 돌아갈까? 불러온 뒤 수정한 자동번역은 대체되고, 수동번역과 메모는 유지돼.');
+            if (!confirmed || currentEntityKey(kind) !== key) return;
+            await undoAutoImport(kind, key);
+            showAutoTab(kind);
+            toastr.success('불러오기 전 자동번역으로 되돌렸어.', EXT_NAME);
+        } catch (err) {
+            toastr.error(`되돌리기 실패: ${err.message}`, EXT_NAME);
+        } finally {
+            button.disabled = false;
+        }
+    });
 }
 
 // 패널 재렌더 중에도 편집 초안을 유지하되, settings에는 기록하지 않음.
@@ -1798,11 +1941,11 @@ function bindAutoFieldEditor(block, kind, key, field, translation) {
         actions.className = 'peek-editor-actions';
         const save = document.createElement('button');
         save.type = 'button';
-        save.className = 'menu_button peek-auto-save';
+        save.className = 'peek-action-btn peek-auto-save';
         save.textContent = '저장';
         const cancel = document.createElement('button');
         cancel.type = 'button';
-        cancel.className = 'menu_button peek-auto-cancel';
+        cancel.className = 'peek-action-btn peek-auto-cancel';
         cancel.textContent = '취소';
         cancel.addEventListener('click', () => {
             autoEditDrafts.delete(id);
