@@ -1615,40 +1615,142 @@ function displayGreetingText(text) {
 }
 
 function resolveGreetingSwipe(message, index, entries) {
-    if (!message || message.is_user || message.is_system || !Number.isInteger(index) || index < 0
-        || (message.gen_started && !message.swipes?.length) || message.swipe_info?.[index]?.gen_started) return undefined;
-    const swipe = message.swipes?.[index] ?? (index === 0 ? message.mes : undefined);
-    if (typeof swipe !== 'string' || !swipe.trim()) return undefined;
-    const normalize = text => String(text ?? '').replace(/\r\n/g, '\n').trim();
-    const matches = entries.filter(entry => normalize(entry.source)
-        && (normalize(entry.source) === normalize(swipe) || normalize(displayGreetingText(entry.source)) === normalize(swipe)));
+    const swipe = swipeOriginal(message, index);
+    if (swipe === undefined) return undefined;
+    const matches = entries.filter(entry => sameGreetingSource(entry.source, swipe));
     return matches.length === 1 ? matches[0] : undefined;
 }
 
-function preferredGreeting(entry) {
-    const matchesSource = record => record?.text && (record.source === undefined || record.source === entry?.source);
-    if (matchesSource(entry?.direct)) return entry.direct;
-    if (matchesSource(entry?.automatic)) return entry.automatic;
-    return undefined;
+function swipeOriginal(message, index) {
+    if (!message || message.is_user || message.is_system || !Number.isInteger(index) || index < 0
+        || (message.gen_started && !message.swipes?.length) || message.swipe_info?.[index]?.gen_started) return undefined;
+    const text = message.swipes?.[index] ?? (index === 0 ? message.mes : undefined);
+    return typeof text === 'string' && text.trim() ? text : undefined;
 }
 
-function showGreetingOverlay(original, translation) {
-    if (!original) return;
-    let overlay = original.nextElementSibling;
-    if (!overlay?.classList.contains('peek-greeting-overlay')) overlay = null;
-    if (!translation?.text) {
-        overlay?.remove();
-        original.classList.remove('peek-greeting-original');
+function sameGreetingSource(source, swipe) {
+    const normalize = text => String(text ?? '').replace(/\r\n/g, '\n').trim();
+    const original = normalize(source);
+    return !!original && (original === normalize(swipe) || normalize(displayGreetingText(source)) === normalize(swipe));
+}
+
+function greetingLinkCandidate(message, index, entries) {
+    const source = swipeOriginal(message, index);
+    if (!source) return undefined;
+    const current = resolveGreetingSwipe(message, index, entries);
+    const translated = entries.filter(entry => !entry.authored && (entry.direct?.text || entry.automatic?.text));
+    const records = entry => [entry.direct, entry.automatic].filter(record => record?.text);
+    // A recorded source can follow a moved greeting. An ambiguous match is
+    // only a suggestion and requires the same explicit comparison as legacy data.
+    const matches = translated.filter(entry => records(entry).some(record => sameGreetingSource(record.source, source)));
+    const hinted = translated.find(entry => entry.key === (index === 0 ? 'first_mes' : ALT_KEY_PREFIX + index));
+    const entry = matches.length === 1 ? matches[0] : translated.includes(current) ? current : hinted;
+    if (!entry) return undefined;
+    const available = records(entry);
+    const record = available.find(item => sameGreetingSource(item.source, source)) ?? available[0];
+    const direct = record === entry.direct;
+    const status = matches.length > 1 ? '원문 중복'
+        : !record.source ? '원문 기록 없음'
+            : sameGreetingSource(record.source, source) ? '원문 일치' : '원문 변경';
+    return { entry, record, direct, source, status };
+}
+
+function activeGreetingLink(message, index, entries, links, avatar) {
+    const link = links?.[index];
+    if (!link || link.avatar !== avatar || swipeOriginal(message, index) !== link.source) return undefined;
+    const entry = entries.find(item => item.key === link.key);
+    const record = link.direct ? entry?.direct : entry?.automatic;
+    return record?.text === link.text ? link : undefined;
+}
+
+const nativeGreetingDisplays = new WeakMap();
+function renderNativeGreeting(original, message, translation) {
+    if (!original || !message) return;
+    const prior = nativeGreetingDisplays.get(original);
+    // Native updates may replace the contents on a swipe or while editing.
+    const stillShowing = prior && original.childNodes.length === prior.rendered.length
+        && prior.rendered.every((node, index) => original.childNodes[index] === node);
+    const editing = original.querySelector('.edit_textarea');
+    const context = getContext();
+    const text = translation?.text && displayGreetingText(translation.text);
+    const display = text?.replaceAll('{{', '&#123;{');
+    if (!display || editing || message.extra?.display_text != null || !context.updateMessageBlock || text === message.mes || display === message.mes) {
+        if (stillShowing && !editing) {
+            if (message.extra?.display_text != null) context.updateMessageBlock?.(0, message);
+            else original.replaceChildren(...prior.original);
+        }
+        nativeGreetingDisplays.delete(original);
         return;
     }
-    if (!overlay) {
-        overlay = document.createElement('div');
-        overlay.className = 'peek-greeting-overlay';
-        original.after(overlay);
+    if (stillShowing && prior.text === text && prior.message === message && prior.swipe === message.swipe_id) return;
+    // Pass a temporary display-only message to the native renderer. The live
+    // message, extra, and swipe data stay untouched and can be saved normally.
+    const originalNodes = stillShowing ? prior.original : [...original.childNodes];
+    context.updateMessageBlock(0, { ...message, extra: { ...message.extra, display_text: display } });
+    nativeGreetingDisplays.set(original, { original: originalNodes, rendered: [...original.childNodes], text, message, swipe: message.swipe_id });
+}
+
+function renderGreetingLinkControl(dialog, message, entries, avatar, enabled) {
+    const input = dialog.querySelector('#swipe_picker_id_0');
+    const label = input?.closest('label') ?? dialog.querySelector('label[for="swipe_picker_id_0"]');
+    let control = dialog.querySelector('.peek-greeting-link');
+    if (!enabled || !label || input.disabled) {
+        control?.remove();
+        return;
     }
-    const text = displayGreetingText(translation.text);
-    if (overlay.textContent !== text) overlay.textContent = text;
-    original.classList.add('peek-greeting-original');
+    if (!control) {
+        control = document.createElement('div');
+        control.className = 'peek-greeting-link';
+        label.after(control);
+        input.addEventListener('input', scheduleGreetingDisplay);
+    }
+    const context = getContext();
+    const metadata = context.chatMetadata;
+    const index = Number(input.value) - 1;
+    const link = activeGreetingLink(message, index, entries, metadata?.peekGreetingLinks, avatar);
+    const candidate = greetingLinkCandidate(message, index, entries);
+    const stale = metadata?.peekGreetingLinks?.[index];
+    const changed = stale?.avatar === avatar && stale.source !== candidate?.source;
+    const statusText = link ? (link.confirmed ? '직접 연결됨' : '원문 일치') : changed ? '원문 변경' : candidate?.status;
+    const signature = JSON.stringify([index, candidate?.entry.key, candidate?.record.text, candidate?.source, statusText, candidate?.direct, link?.text]);
+    if (signature === control.dataset.state) return;
+    control.dataset.state = signature;
+    control.replaceChildren();
+    if (!metadata || (!candidate && !link)) return;
+    const status = document.createElement('small');
+    status.textContent = statusText;
+    const confirm = !link && (candidate.direct || statusText !== '원문 일치');
+    const button = greetingButton(link ? '번역 해제' : confirm ? '연결 확인' : '번역 적용', async () => {
+        button.disabled = true;
+        try {
+            if (confirm) {
+                const accepted = await Popup.show.confirm('이 원문에 연결', `
+                    <div class="peek-greeting-comparison">
+                        <strong>스와이프 ${index + 1} · 원문</strong>
+                        <pre>${escapeHtml(candidate.source)}</pre>
+                        <strong>${escapeHtml(candidate.entry.label)} · ${candidate.direct ? '직접 추가' : '자동 번역'}</strong>
+                        <pre>${escapeHtml(candidate.record.text)}</pre>
+                    </div>`, { okButton: '이 원문에 연결', cancelButton: '취소' });
+                if (!accepted) return;
+            }
+            const currentContext = getContext();
+            if (currentContext.chatMetadata !== metadata || chat[0] !== message || getCurrentCharKey() !== avatar
+                || Number(input.value) - 1 !== index || swipeOriginal(message, index) !== (link?.source ?? candidate?.source)) return;
+            const links = metadata.peekGreetingLinks ??= {};
+            if (link) delete links[index];
+            else links[index] = {
+                avatar, source: candidate.source, key: candidate.entry.key,
+                text: candidate.record.text, direct: candidate.direct, confirmed: confirm,
+            };
+            refreshGreetingDisplay();
+            await currentContext.saveMetadata();
+        } catch (error) {
+            toastr.error(`연결 저장 실패: ${error.message}`, EXT_NAME);
+        } finally {
+            button.disabled = false;
+        }
+    });
+    control.append(status, button);
 }
 
 function restoreGreetingPreview(preview) {
@@ -1661,7 +1763,6 @@ function restoreGreetingPreview(preview) {
 function clearGreetingOverlays(root) {
     root.querySelectorAll('.peek-greeting-preview').forEach(restoreGreetingPreview);
     root.querySelectorAll('.peek-greeting-overlay, .peek-greeting-reference').forEach(element => element.remove());
-    root.querySelectorAll('.peek-greeting-original').forEach(element => element.classList.remove('peek-greeting-original'));
 }
 
 function renderGreetingReferences(list, entries, connected) {
@@ -1705,14 +1806,19 @@ function refreshGreetingDisplay() {
     const settings = loadSettings();
     const avatar = getCurrentCharKey();
     const char = getCurrentChar();
+    const original = document.querySelector('#chat .mes[mesid="0"] .mes_text');
     const canDisplay = (settings.chatGreetingTranslations || settings.listGreetingTranslations)
         && avatar && char && !getContext().groupId;
     if (!canDisplay) {
+        renderNativeGreeting(original, chat[0]);
+        document.querySelectorAll('.peek-greeting-link').forEach(control => control.remove());
         clearGreetingOverlays(document);
         return;
     }
     if (!isEntityLoaded('char', avatar)) {
         // The character panel already loads the same entity on chat changes.
+        renderNativeGreeting(original, chat[0]);
+        document.querySelectorAll('.peek-greeting-link').forEach(control => control.remove());
         clearGreetingOverlays(document);
         return;
     }
@@ -1720,7 +1826,6 @@ function refreshGreetingDisplay() {
     const opening = chat[0];
     const chatContainer = document.getElementById('chat');
     const chatRow = chatContainer?.querySelector('.mes[mesid="0"]');
-    const original = chatRow?.querySelector('.mes_text');
     const currentSwipe = Number(opening?.swipe_id ?? 0);
     if (chatRow && settings.listGreetingTranslations && original && (opening?.swipes?.length ?? 0) <= 1
         && !opening?.is_user && !opening?.is_system) {
@@ -1729,13 +1834,16 @@ function refreshGreetingDisplay() {
     } else {
         chatRow?.querySelector('.peek-greeting-reference')?.remove();
     }
-    const selected = settings.chatGreetingTranslations && !chatRow?.querySelector('textarea.edit_textarea, .edit_textarea')
-        ? preferredGreeting(resolveGreetingSwipe(opening, currentSwipe, entries)) : undefined;
-    showGreetingOverlay(original, selected);
+    const links = getContext().chatMetadata?.peekGreetingLinks;
+    const selected = settings.chatGreetingTranslations
+        ? activeGreetingLink(opening, currentSwipe, entries, links, avatar) : undefined;
+    renderNativeGreeting(original, opening, selected);
 
     for (const list of document.querySelectorAll('.swipe_picker_div')) {
         const dialog = list.closest('dialog');
-        if (!settings.listGreetingTranslations || !dialog?.open || !dialog.querySelector('[id="swipe_picker_id_0"]')) {
+        const supported = dialog?.open && dialog.querySelector('[id="swipe_picker_id_0"]');
+        if (dialog) renderGreetingLinkControl(dialog, opening, entries, avatar, supported && settings.chatGreetingTranslations);
+        if (!settings.listGreetingTranslations || !supported) {
             clearGreetingOverlays(list);
             continue;
         }
@@ -1743,8 +1851,11 @@ function refreshGreetingDisplay() {
         for (const row of list.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
             const index = Number(row.dataset.swipeId);
             const entry = resolveGreetingSwipe(opening, index, entries);
-            const translation = preferredGreeting(entry);
-            if (entry && (translation || !entry.direct?.text && !entry.automatic?.text)) connected.add(entry.key);
+            const linked = activeGreetingLink(opening, index, entries, links, avatar);
+            const candidate = greetingLinkCandidate(opening, index, entries);
+            const translation = linked ?? (candidate?.status === '원문 일치' ? candidate.record : undefined);
+            if (translation && (linked?.key ?? candidate?.entry.key)) connected.add(linked?.key ?? candidate.entry.key);
+            else if (entry && !entry.direct?.text && !entry.automatic?.text) connected.add(entry.key);
             // Place the translation inside the preview so the host's expand,
             // collapse, and selection behavior still applies to the row.
             const preview = row.querySelector('.select_chat_block_mes');
@@ -1780,14 +1891,14 @@ function observeGreetingDisplay() {
         if (!settings.chatGreetingTranslations && !settings.listGreetingTranslations) return;
         const relevant = records.some(record => {
             const target = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
-            if (target?.closest('.peek-greeting-overlay, .peek-greeting-reference')) return false;
+            if (target?.closest('.peek-greeting-overlay, .peek-greeting-reference, .peek-greeting-link')) return false;
             if (target?.closest(selector) || target?.matches('dialog') && target.querySelector('.swipe_picker_div')) return true;
             return [...record.addedNodes].some(node => node.nodeType === Node.ELEMENT_NODE
                 && (node.matches(selector) || node.querySelector(selector)));
         });
         if (relevant) scheduleGreetingDisplay();
     });
-    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open'] });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open', 'highlight'] });
     for (const event of [event_types.CHAT_CHANGED, event_types.MESSAGE_SWIPED, event_types.MESSAGE_UPDATED, event_types.CHARACTER_MESSAGE_RENDERED, event_types.PERSONA_CHANGED]) {
         if (event) eventSource.on(event, scheduleGreetingDisplay);
     }

@@ -13,7 +13,7 @@ function harness() {
     const settings = {};
     let fail = () => false;
     const context = vm.createContext({
-        structuredClone, TextEncoder, btoa, setTimeout, clearTimeout, characters: [],
+        structuredClone, TextEncoder, btoa, setTimeout, clearTimeout, characters: [], name1: '', this_chid: undefined,
         extension_settings: settings,
         jQuery: () => {},
         getContext: () => ({ getRequestHeaders: () => ({ 'Content-Type': 'application/json' }) }),
@@ -39,7 +39,7 @@ function harness() {
         loadSettings, applyEntityData, collectEntityData, persistEntity, replaceAutoWithUndo,
         undoAutoImport, readUndoBackup, undoFileName, entityFileName,
         savedAutoEntries, characterTranslationTargets, translateWithProfile, runTranslation,
-        greetingEntries, resolveGreetingSwipe, preferredGreeting, displayGreetingText, buildBackupObject,
+        greetingEntries, resolveGreetingSwipe, greetingLinkCandidate, activeGreetingLink, displayGreetingText, buildBackupObject,
         clearCache: () => undoBackups.clear(),
     };`, context);
     const storage = context.storage;
@@ -210,20 +210,40 @@ test('swipe resolution uses original text, prefers direct additions, and skips a
     h.context.name1 = '독자';
     h.context.this_chid = 0;
     h.context.characters.push({ name: '테스트' });
-    const { greetingEntries, resolveGreetingSwipe, preferredGreeting } = h.storage;
+    const { greetingEntries, resolveGreetingSwipe, greetingLinkCandidate } = h.storage;
     const char = { first_mes: 'Hello {{user}}', data: { alternate_greetings: ['ALT', 'Duplicate', 'Duplicate'] } };
     const entries = greetingEntries(char,
         { first_mes: { text: '안녕' }, alt_greeting_1: { text: '오래된 자동 번역', source: 'Old' }, alt_greeting_9: { text: '남은 자동 번역' } },
         { alt_greeting_1: { text: '직접 추가', source: 'ALT' }, alt_greeting_8: { text: '남은 직접 추가' }, extra_1: { text: '직접 작성' } });
     const message = { mes: 'ALT', swipe_id: 0, swipes: ['ALT', 'Hello 독자', 'Duplicate', '직접 작성', 'ALT'], swipe_info: [{}, {}, {}, {}, { gen_started: 1 }] };
-    assert.equal(preferredGreeting(resolveGreetingSwipe(message, 0, entries)).text, '직접 추가');
-    assert.equal(preferredGreeting(resolveGreetingSwipe(message, 1, entries)).text, '안녕');
+    assert.equal(greetingLinkCandidate(message, 0, entries).record.text, '직접 추가');
+    assert.equal(greetingLinkCandidate(message, 1, entries).record.text, '안녕');
     assert.equal(resolveGreetingSwipe(message, 2, entries), undefined);
     assert.equal(resolveGreetingSwipe(message, 3, entries), undefined);
     assert.equal(resolveGreetingSwipe(message, 4, entries), undefined);
     assert.deepEqual(clone(entries.slice(-3).map(entry => entry.label)), ['ALT 8', 'ALT 9', '추가 1']);
-    assert.equal(preferredGreeting({ source: 'ALT', automatic: { text: 'stale', source: 'Old' } }), undefined);
+    assert.equal(greetingLinkCandidate({ mes: 'ALT' }, 0, [{ key: 'first_mes', source: 'ALT', automatic: { text: 'stale', source: 'Old' } }]).status, '원문 변경');
     assert.equal(h.storage.displayGreetingText('{{user}} · {{char}} {{setvar::x::y}} {{newline}}'), '독자 · 테스트 {{setvar::x::y}} \n');
     assert.equal(message.mes, 'ALT');
     assert.equal(message.swipes[1], 'Hello 독자');
+});
+
+test('links track recorded source across index changes and expire when original or translation changes', () => {
+    const { storage } = harness();
+    const auto = { alt_greeting_1: { text: '한국어', source: 'Original' }, alt_greeting_2: { text: '과거 번역' } };
+    const entries = storage.greetingEntries({ first_mes: 'Start', alternate_greetings: ['Other', 'Original'] }, auto);
+    const message = { mes: 'Start', swipes: ['Start', 'Other', 'Original'] };
+    const candidate = storage.greetingLinkCandidate(message, 2, entries);
+    assert.equal(candidate.entry.key, 'alt_greeting_1');
+    assert.equal(candidate.status, '원문 일치');
+    const links = { 2: { avatar: 'target.png', source: candidate.source, key: candidate.entry.key, text: candidate.record.text } };
+    assert.equal(storage.activeGreetingLink(message, 2, entries, links, 'target.png').text, '한국어');
+    assert.equal(storage.activeGreetingLink(message, 2, entries, links, 'other.png'), undefined);
+    assert.equal(storage.activeGreetingLink(message, 1, entries, links, 'target.png'), undefined);
+    message.swipes[2] = 'Changed';
+    assert.equal(storage.activeGreetingLink(message, 2, entries, links, 'target.png'), undefined);
+    assert.equal(storage.greetingLinkCandidate(message, 2, entries).status, '원문 기록 없음');
+    message.swipes[2] = 'Original';
+    auto.alt_greeting_1.text = '수정됨';
+    assert.equal(storage.activeGreetingLink(message, 2, entries, links, 'target.png'), undefined);
 });
