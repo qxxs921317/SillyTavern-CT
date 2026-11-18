@@ -1235,13 +1235,14 @@ function renderTranslationPanel() {
     const charKey = getCurrentCharKey();
 
     let panel = document.getElementById('peek_translation_panel');
+    const greetingPanel = document.getElementById('peek_greeting_panel');
 
     // 캐릭터 없으면 패널 숨김
     if (!char || !charKey) {
         if (panel) panel.style.display = 'none';
-        // 메모 패널도 숨김
-        const np = document.getElementById('peek_notes_panel');
-        if (np) np.style.display = 'none';
+        if (greetingPanel) greetingPanel.hidden = true;
+        const notesPanel = document.getElementById('peek_notes_panel');
+        if (notesPanel) notesPanel.style.display = 'none';
         return;
     }
 
@@ -1258,6 +1259,7 @@ function renderTranslationPanel() {
 
     // 파일에서 아직 안 읽어온 캐릭터면 로딩 표시 후 비동기 로드
     if (!isEntityLoaded('char', charKey)) {
+        if (greetingPanel) greetingPanel.hidden = true;
         const gen = ++charRenderGen;
         panel.classList.add('peek-loading');
         updateLoadingMessage('불러오는 중...');
@@ -1316,17 +1318,12 @@ function renderTranslationPanel() {
         }
     }
 
-    // 자동 탭 본문
+    // ALT 번역이 있으면 기본 그리팅도 별도 카드에 표시한다.
+    const greetings = savedAltGreetings(charTranslations);
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>캐릭터 설명 옆 👀 버튼을 눌러서 번역해봐</div>`;
     } else {
-        const priorIndex = autoContent.querySelector('.peek-greeting-index');
-        const sameCharacter = autoContent.dataset.peekKey === charKey;
-        const selected = sameCharacter ? priorIndex?.querySelector('[aria-pressed="true"]')?.dataset.field : undefined;
-        const scrollLeft = sameCharacter ? priorIndex?.scrollLeft ?? 0 : 0;
-        autoContent.dataset.peekKey = charKey;
         autoContent.replaceChildren();
-        const greetings = savedAltGreetings(charTranslations);
         for (const field of TRANSLATABLE_FIELDS) {
             if (field.key === 'first_mes' && greetings.length) continue;
             const translation = charTranslations[field.key];
@@ -1334,10 +1331,19 @@ function renderTranslationPanel() {
                 autoContent.append(createCharacterTranslationBlock(charKey, field.key, `${field.label} · ${field.desc}`, translation));
             }
         }
-        if (greetings.length) {
-            if (charTranslations.first_mes?.text) greetings.unshift({ key: 'first_mes', label: '기본' });
-            autoContent.append(createGreetingIndex(charKey, charTranslations, greetings, selected, scrollLeft));
-        }
+    }
+    if (!greetings.length) greetingPanel?.remove();
+    else if (activeTab !== 'auto') {
+        if (greetingPanel) greetingPanel.hidden = true;
+    } else {
+        if (charTranslations.first_mes?.text) greetings.unshift({ key: 'first_mes', label: '기본' });
+        const sameCharacter = greetingPanel?.dataset.peekKey === charKey;
+        const priorIndex = greetingPanel?.querySelector('.peek-greeting-index');
+        const selected = sameCharacter ? priorIndex?.querySelector('[aria-pressed="true"]')?.dataset.field : undefined;
+        const scrollLeft = sameCharacter ? priorIndex?.scrollLeft ?? 0 : 0;
+        const card = createGreetingIndex(charKey, charTranslations, greetings, selected, scrollLeft);
+        greetingPanel?.remove();
+        panel.after(card);
     }
 
     // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
@@ -1389,10 +1395,11 @@ function createCharacterTranslationBlock(charKey, field, label, translation) {
 
 function createGreetingIndex(charKey, translations, greetings, selected, scrollLeft) {
     const section = document.createElement('section');
-    section.className = 'peek-greetings';
-    section.setAttribute('aria-label', '그리팅 번역');
+    section.id = 'peek_greeting_panel';
+    section.dataset.peekKey = charKey;
+    section.setAttribute('aria-label', 'First Message');
     section.innerHTML = `
-        <div class="peek-greeting-heading"><strong>그리팅 번역</strong><span aria-live="polite"></span></div>
+        <div class="peek-greeting-heading"><strong class="peek-field-label">First Message</strong><span aria-live="polite"></span></div>
         <div class="peek-greeting-navigation">
             <button type="button" class="peek-tab peek-greeting-previous" aria-label="앞 번호 보기">‹</button>
             <div class="peek-greeting-index" role="group" aria-label="그리팅 번호"></div>
@@ -1478,7 +1485,8 @@ function renderCharNotesPanel(translationPanel, charKey) {
                 }
             },
         });
-        translationPanel.parentNode.insertBefore(notesPanel, translationPanel.nextSibling);
+        const previousPanel = document.getElementById('peek_greeting_panel') || translationPanel;
+        previousPanel.after(notesPanel);
     }
 
     notesPanel.style.display = '';
