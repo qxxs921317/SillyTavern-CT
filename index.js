@@ -20,6 +20,31 @@ const TRANSLATABLE_FIELDS = [
     { key: 'mes_example', label: 'Example Messages', desc: '예시 대화' },
     { key: 'creatorcomment', label: 'Creator Notes', desc: '제작자 노트' },
 ];
+const ALT_FIELD = { key: 'alternate_greetings', label: 'ALT 전체 번역', desc: '모든 대체 그리팅' };
+const ALT_KEY_PREFIX = 'alt_greeting_';
+
+function characterTranslationTargets(char, selectedFields) {
+    const targets = TRANSLATABLE_FIELDS
+        .filter(field => selectedFields.includes(field.key))
+        .map(field => ({ ...field, source: char.data?.[field.key] ?? char[field.key] }));
+    const greetings = char.data?.[ALT_FIELD.key] ?? char[ALT_FIELD.key];
+    if (selectedFields.includes(ALT_FIELD.key) && Array.isArray(greetings)) {
+        greetings.forEach((source, index) => {
+            const number = index + 1;
+            targets.push({ key: ALT_KEY_PREFIX + number, label: `ALT ${number}`, source });
+        });
+    }
+    return targets.filter(target => target.source && String(target.source).trim());
+}
+
+function savedAltGreetings(auto) {
+    return Object.keys(auto ?? {})
+        .filter(key => /^alt_greeting_[1-9]\d*$/.test(key) && auto[key]?.text)
+        .map(key => ({ key, number: Number(key.slice(ALT_KEY_PREFIX.length)) }))
+        .sort((a, b) => a.number - b.number)
+        .map(({ key, number }) => ({ key, label: `ALT ${number}` }));
+}
+
 
 // 기본 설정
 const defaultSettings = {
@@ -279,25 +304,27 @@ function schedulePersist(kind, key, delay = 700) {
  */
 async function persistEntity(kind, key) {
     if (!key || !SECTIONS[kind]) return;
-    return queueEntityWrite(kind, key, async () => {
-        loadedEntities.add(entityId(kind, key));
-        if (storageFailed) {
-            persistLegacy(kind, key);
-            return;
+    return queueEntityWrite(kind, key, () => persistEntityImmediately(kind, key));
+}
+
+async function persistEntityImmediately(kind, key) {
+    loadedEntities.add(entityId(kind, key));
+    if (storageFailed) {
+        persistLegacy(kind, key);
+        return;
+    }
+    try {
+        await persistEntityFile(kind, key);
+    } catch (err) {
+        console.error('[Peek] 파일 저장 실패 — 레거시 모드로 전환:', err);
+        storageFailed = true;
+        loadSettings().storageMode = 'legacy';
+        if (!storageWarned) {
+            storageWarned = true;
+            toastr.warning('파일 저장에 실패해서 기존 방식(설정 저장)으로 전환했어. 데이터는 안 날아가.', EXT_NAME);
         }
-        try {
-            await persistEntityFile(kind, key);
-        } catch (err) {
-            console.error('[Peek] 파일 저장 실패 — 레거시 모드로 전환:', err);
-            storageFailed = true;
-            loadSettings().storageMode = 'legacy';
-            if (!storageWarned) {
-                storageWarned = true;
-                toastr.warning('파일 저장에 실패해서 기존 방식(설정 저장)으로 전환했어. 데이터는 안 날아가.', EXT_NAME);
-            }
-            persistLegacy(kind, key);
-        }
-    });
+        persistLegacy(kind, key);
+    }
 }
 
 async function persistEntityFile(kind, key) {
@@ -426,8 +453,10 @@ function buildTranslationPrompt(fieldLabel, sourceText) {
 
 Context: This is a "${fieldLabel}" field from a SillyTavern roleplay character or persona definition.
 
+Highest-priority rule: Copy every SillyTavern macro (anything written as {{...}}) verbatim, including its name, arguments, case, punctuation, and internal whitespace. Preserve the order and repetitions of the macros. Do not translate, expand, remove, or add macros.
+
 Rules:
-- Preserve all formatting, line breaks, and special tokens like {{char}}, {{user}}, <tags>, brackets, asterisks for emphasis, etc.
+- Preserve formatting, line breaks, tags, brackets, and emphasis.
 - Do NOT add any explanation, commentary, preamble, or notes.
 - Output ONLY the translated text, nothing else.
 - Keep proper nouns (names of people, places) in their original form unless they have a standard Korean equivalent.
@@ -571,13 +600,7 @@ async function runTranslation() {
         return;
     }
 
-    // 번역할 필드 + 비어있지 않은 것만
-    const fieldsToTranslate = TRANSLATABLE_FIELDS
-        .filter(f => settings.selectedFields.includes(f.key))
-        .filter(f => {
-            const val = char.data?.[f.key] ?? char[f.key];
-            return val && String(val).trim().length > 0;
-        });
+    const fieldsToTranslate = characterTranslationTargets(char, settings.selectedFields);
 
     if (fieldsToTranslate.length === 0) {
         toastr.info('번역할 내용이 없어 (해당 필드들이 비어있음)', EXT_NAME);
@@ -589,14 +612,17 @@ async function runTranslation() {
     const profile = profiles.find(p => p.id === settings.profileId);
     const profileName = profile?.name || '(알 수 없는 프로필)';
 
-    const fieldList = fieldsToTranslate.map(f => `• ${f.label} (${f.desc})`).join('\n');
+    const altCount = fieldsToTranslate.filter(field => field.key.startsWith(ALT_KEY_PREFIX)).length;
+    const fieldList = fieldsToTranslate.filter(field => field.desc).map(field => `• ${field.label} (${field.desc})`);
+    if (altCount) fieldList.push(`• ALT 그리팅 ${altCount}개`);
     const charName = char.name || '이 캐릭터';
+    const profileId = settings.profileId;
 
     const confirmed = await Popup.show.confirm(
         '번역 확인',
         `<div style="text-align:left;">
-            <p><b>${charName}</b>의 다음 필드를 <b>${profileName}</b>으로 번역할까?</p>
-            <pre style="white-space:pre-wrap;font-size:0.9em;opacity:0.85;margin:8px 0;">${fieldList}</pre>
+            <p><b>${escapeHtml(charName)}</b>의 다음 필드를 <b>${escapeHtml(profileName)}</b>으로 번역할까?</p>
+            <pre style="white-space:pre-wrap;font-size:0.9em;opacity:0.85;margin:8px 0;">${fieldList.join('\n')}</pre>
             <p style="font-size:0.85em;opacity:0.7;">기존 번역이 있으면 덮어쓸거야.</p>
         </div>`
     );
@@ -607,23 +633,20 @@ async function runTranslation() {
     const panel = document.getElementById('peek_translation_panel');
     if (panel) panel.classList.add('peek-loading');
 
-    if (!peekData.translations[charKey]) {
-        peekData.translations[charKey] = {};
-    }
+    const translatedFields = {};
 
     let success = 0;
     let failed = 0;
 
     for (const field of fieldsToTranslate) {
         try {
-            const sourceText = String(char.data?.[field.key] ?? char[field.key] ?? '');
             updateLoadingMessage(`${field.label} 번역 중...`);
             const translated = await translateWithProfile(
-                settings.profileId,
+                profileId,
                 field.label,
-                sourceText
+                String(field.source)
             );
-            peekData.translations[charKey][field.key] = {
+            translatedFields[field.key] = {
                 text: translated,
                 translatedAt: Date.now(),
             };
@@ -635,9 +658,21 @@ async function runTranslation() {
         }
     }
 
-    await persistEntity('char', charKey);
-    if (panel) panel.classList.remove('peek-loading');
-    renderTranslationPanel();
+    try {
+        if (success) {
+            await queueEntityWrite('char', charKey, async () => {
+                await ensureEntity('char', charKey);
+                peekData.translations[charKey] = { ...peekData.translations[charKey], ...translatedFields };
+                await persistEntityImmediately('char', charKey);
+            });
+        }
+    } catch (err) {
+        toastr.error(`번역 저장 실패: ${err.message}`, EXT_NAME);
+        return;
+    } finally {
+        if (panel) panel.classList.remove('peek-loading');
+        renderTranslationPanel();
+    }
 
     if (success > 0 && failed === 0) {
         toastr.success(`${success}개 필드 번역 완료!`, EXT_NAME);
@@ -898,7 +933,7 @@ function renderPersonaPanel() {
     }
 
     // 탭 활성/데이터 표시
-    panel.querySelectorAll('.peek-tab').forEach(t => {
+    panel.querySelectorAll('.peek-tabs .peek-tab').forEach(t => {
         if (t.dataset.tab === activeTab) t.classList.add('peek-tab-active');
         else t.classList.remove('peek-tab-active');
         const has = t.dataset.tab === 'auto' ? hasAuto : hasManual;
@@ -1068,7 +1103,7 @@ function createPersonaPanelElement() {
     });
 
     // 탭 클릭
-    panel.querySelectorAll('.peek-tab').forEach(tab => {
+    panel.querySelectorAll('.peek-tabs .peek-tab').forEach(tab => {
         tab.addEventListener('click', (e) => {
             e.stopPropagation();
             const settings = loadSettings();
@@ -1248,7 +1283,7 @@ function renderTranslationPanel() {
     }
 
     // 탭 버튼 활성/데이터 표시
-    panel.querySelectorAll('.peek-tab').forEach(t => {
+    panel.querySelectorAll('.peek-tabs .peek-tab').forEach(t => {
         if (t.dataset.tab === activeTab) t.classList.add('peek-tab-active');
         else t.classList.remove('peek-tab-active');
         const has = t.dataset.tab === 'auto' ? hasAuto : hasManual;
@@ -1285,34 +1320,24 @@ function renderTranslationPanel() {
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>캐릭터 설명 옆 👀 버튼을 눌러서 번역해봐</div>`;
     } else {
-        const blocks = [];
+        const priorIndex = autoContent.querySelector('.peek-greeting-index');
+        const sameCharacter = autoContent.dataset.peekKey === charKey;
+        const selected = sameCharacter ? priorIndex?.querySelector('[aria-pressed="true"]')?.dataset.field : undefined;
+        const scrollLeft = sameCharacter ? priorIndex?.scrollLeft ?? 0 : 0;
+        autoContent.dataset.peekKey = charKey;
+        autoContent.replaceChildren();
+        const greetings = savedAltGreetings(charTranslations);
         for (const field of TRANSLATABLE_FIELDS) {
-            const tr = charTranslations[field.key];
-            if (!tr || !tr.text) continue;
-            const safeText = escapeHtml(tr.text);
-            blocks.push(`
-                <div class="peek-field-block" data-field-key="${escapeHtml(field.key)}">
-                    <div class="peek-field-label">${field.label} · ${field.desc}</div>
-                    <div class="peek-field-content">${safeText}</div>
-                    <button class="peek-copy-btn" type="button" title="복사"><i class="fa-solid fa-copy"></i></button>
-                </div>
-            `);
-        }
-        autoContent.innerHTML = blocks.join('');
-
-        // 필드별 복사 버튼 연결
-        autoContent.querySelectorAll('.peek-field-block').forEach(block => {
-            const key = block.dataset.fieldKey;
-            const btn = block.querySelector('.peek-copy-btn');
-            const tr = charTranslations[key];
-            bindAutoFieldEditor(block, 'char', charKey, key, tr);
-            if (btn && tr && tr.text) {
-                btn.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    copyTextWithFeedback(tr.text, btn);
-                });
+            if (field.key === 'first_mes' && greetings.length) continue;
+            const translation = charTranslations[field.key];
+            if (translation?.text) {
+                autoContent.append(createCharacterTranslationBlock(charKey, field.key, `${field.label} · ${field.desc}`, translation));
             }
-        });
+        }
+        if (greetings.length) {
+            if (charTranslations.first_mes?.text) greetings.unshift({ key: 'first_mes', label: '기본' });
+            autoContent.append(createGreetingIndex(charKey, charTranslations, greetings, selected, scrollLeft));
+        }
     }
 
     // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
@@ -1330,8 +1355,7 @@ function renderTranslationPanel() {
     const footer = panel.querySelector('.peek-footer-time');
     if (footer) {
         if (activeTab === 'auto' && hasAuto) {
-            const allTimes = Object.values(charTranslations).map(t => t.translatedAt || 0);
-            const latest = Math.max(...allTimes);
+            const latest = Object.values(charTranslations).reduce((time, item) => Math.max(time, item?.translatedAt || 0), 0);
             footer.textContent = latest > 0 ? `마지막 자동 번역: ${new Date(latest).toLocaleString()}` : '';
         } else if (activeTab === 'manual' && manual?.updatedAt) {
             footer.textContent = `마지막 수정: ${new Date(manual.updatedAt).toLocaleString()}`;
@@ -1344,6 +1368,90 @@ function renderTranslationPanel() {
 
     // 메모 패널도 같이 렌더
     renderCharNotesPanel(panel, charKey);
+}
+
+function createCharacterTranslationBlock(charKey, field, label, translation) {
+    const block = document.createElement('div');
+    block.className = 'peek-field-block';
+    block.innerHTML = `
+        <div class="peek-field-label">${escapeHtml(label)}</div>
+        <div class="peek-field-content">${escapeHtml(translation.text)}</div>
+        <button class="peek-copy-btn" type="button" title="복사" aria-label="복사"><i class="fa-solid fa-copy"></i></button>
+    `;
+    const copy = block.querySelector('.peek-copy-btn');
+    copy.addEventListener('click', event => {
+        event.stopPropagation();
+        copyTextWithFeedback(translation.text, copy);
+    });
+    bindAutoFieldEditor(block, 'char', charKey, field, translation);
+    return block;
+}
+
+function createGreetingIndex(charKey, translations, greetings, selected, scrollLeft) {
+    const section = document.createElement('section');
+    section.className = 'peek-greetings';
+    section.setAttribute('aria-label', '그리팅 번역');
+    section.innerHTML = `
+        <div class="peek-greeting-heading"><strong>그리팅 번역</strong><span aria-live="polite"></span></div>
+        <div class="peek-greeting-navigation">
+            <button type="button" class="peek-tab peek-greeting-previous" aria-label="앞 번호 보기">‹</button>
+            <div class="peek-greeting-index" role="group" aria-label="그리팅 번호"></div>
+            <button type="button" class="peek-tab peek-greeting-next" aria-label="뒤 번호 보기">›</button>
+        </div>
+        <div class="peek-greeting-body"></div>
+    `;
+    const index = section.querySelector('.peek-greeting-index');
+    const position = section.querySelector('.peek-greeting-heading span');
+    const body = section.querySelector('.peek-greeting-body');
+    const previous = section.querySelector('.peek-greeting-previous');
+    const next = section.querySelector('.peek-greeting-next');
+
+    const buttons = greetings.map(({ key, label }, number) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'peek-tab';
+        button.dataset.field = key;
+        button.textContent = label;
+        button.setAttribute('aria-pressed', 'false');
+        button.addEventListener('click', () => select(number));
+        index.append(button);
+        return button;
+    });
+    let active;
+    function select(number) {
+        active?.classList.remove('peek-tab-active');
+        active?.setAttribute('aria-pressed', 'false');
+        active = buttons[number];
+        active.classList.add('peek-tab-active');
+        active.setAttribute('aria-pressed', 'true');
+        const { key, label } = greetings[number];
+        position.textContent = `${number + 1} / ${greetings.length}`;
+        body.replaceChildren(createCharacterTranslationBlock(charKey, key, label, translations[key]));
+    }
+
+    select(Math.max(0, greetings.findIndex(greeting => greeting.key === selected)));
+    previous.addEventListener('click', () => index.scrollBy({ left: -index.clientWidth * 0.8, behavior: 'smooth' }));
+    next.addEventListener('click', () => index.scrollBy({ left: index.clientWidth * 0.8, behavior: 'smooth' }));
+    const updateArrows = () => {
+        const maxScroll = index.scrollWidth - index.clientWidth;
+        previous.disabled = index.scrollLeft <= 1;
+        next.disabled = index.scrollLeft >= maxScroll - 1;
+    };
+    index.addEventListener('scroll', updateArrows, { passive: true });
+    requestAnimationFrame(() => {
+        if (!section.isConnected) return;
+        index.scrollLeft = scrollLeft;
+        const viewport = index.getBoundingClientRect();
+        const selection = active.getBoundingClientRect();
+        if (selection.left < viewport.left || selection.right > viewport.right) {
+            index.scrollLeft += selection.left - viewport.left;
+        }
+        updateArrows();
+    });
+    // Check overflow on demand after switching tabs or resizing the card panel.
+    section.addEventListener('pointerenter', updateArrows);
+    section.addEventListener('focusin', updateArrows);
+    return section;
 }
 
 /**
@@ -1433,7 +1541,7 @@ function createPanelElement() {
     });
 
     // 탭 클릭
-    panel.querySelectorAll('.peek-tab').forEach(tab => {
+    panel.querySelectorAll('.peek-tabs .peek-tab').forEach(tab => {
         tab.addEventListener('click', (e) => {
             e.stopPropagation();
             const settings = loadSettings();
@@ -1637,7 +1745,8 @@ async function savedAutoEntries(kind) {
                 }
             }
             const records = kind === 'char'
-                ? TRANSLATABLE_FIELDS.filter(f => auto?.[f.key]?.text).map(f => [f.label, auto[f.key].text])
+                ? [...TRANSLATABLE_FIELDS, ...savedAltGreetings(auto)]
+                    .filter(field => auto?.[field.key]?.text).map(field => [field.label, auto[field.key].text])
                 : auto?.text ? [['Persona Description', auto.text]] : [];
             if (records.length) entries.push({ key, name: savedEntityName(kind, key), auto: structuredClone(auto), records });
         }));
@@ -1969,16 +2078,21 @@ function bindAutoFieldEditor(block, kind, key, field, translation) {
             save.disabled = true;
             cancel.disabled = true;
             try {
-                const auto = peekData[SECTIONS[kind].auto][key];
-                const current = kind === 'char' ? auto?.[field] : auto;
-                if (current !== draft.original) {
+                const text = textarea.value;
+                const saved = await queueEntityWrite(kind, key, async () => {
+                    const auto = peekData[SECTIONS[kind].auto][key];
+                    const current = kind === 'char' ? auto?.[field] : auto;
+                    if (current !== draft.original) return false;
+                    const updated = { ...current, text, updatedAt: Date.now() };
+                    if (kind === 'char') auto[field] = updated;
+                    else peekData.personaTranslations[key] = updated;
+                    await persistEntityImmediately(kind, key);
+                    return true;
+                });
+                if (!saved) {
                     toastr.warning('번역이 변경됐어. 취소한 뒤 다시 수정해줘.', EXT_NAME);
                     return;
                 }
-                const updated = { ...current, text: textarea.value, updatedAt: Date.now() };
-                if (kind === 'char') auto[field] = updated;
-                else peekData.personaTranslations[key] = updated;
-                await persistEntity(kind, key);
                 autoEditDrafts.delete(id);
                 renderEntityPanel(kind);
                 toastr.success('수정한 자동번역을 저장했어.', EXT_NAME);
@@ -2487,7 +2601,7 @@ function renderSettingsPanel() {
               return `<option value="${escapeHtml(p.id)}" ${selected}>${name}</option>`;
           }).join('');
 
-    const fieldCheckboxes = TRANSLATABLE_FIELDS.map(f => {
+    const fieldCheckboxes = [...TRANSLATABLE_FIELDS, ALT_FIELD].map(f => {
         const checked = settings.selectedFields.includes(f.key) ? 'checked' : '';
         return `
             <label class="peek-field-checkbox" title="${f.desc}">
