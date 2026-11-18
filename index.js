@@ -454,6 +454,9 @@ function getConnectionProfiles() {
  * 번역 프롬프트 생성
  */
 function buildTranslationPrompt(fieldLabel, sourceText) {
+    const greetingStyle = fieldLabel === 'First Message' || /^ALT [1-9]\d*$/.test(fieldLabel)
+        ? `\n- For this opening scene, write idiomatic Korean dialogue and narration. Avoid literal phrasing and English word order. Use natural Korean speech levels and sentence endings that fit the characters' relationship, and keep narration distinct from dialogue. Preserve the original meaning, voice, and emotional tone without adding details.`
+        : '';
     return `You are a professional translator. Translate the following text into natural, fluent Korean.
 
 Context: This is a "${fieldLabel}" field from a SillyTavern roleplay character or persona definition.
@@ -465,7 +468,7 @@ Rules:
 - Do NOT add any explanation, commentary, preamble, or notes.
 - Output ONLY the translated text, nothing else.
 - Keep proper nouns (names of people, places) in their original form unless they have a standard Korean equivalent.
-- Maintain the original tone (formal, casual, narrative, etc.).
+- Maintain the original tone (formal, casual, narrative, etc.).${greetingStyle}
 
 ---SOURCE---
 ${sourceText}
@@ -1704,6 +1707,8 @@ function renderNativeGreeting(original, message, translation) {
     nativeGreetingDisplays.set(original, { original: originalNodes, rendered: [...original.childNodes], text, message, swipe: message.swipe_id });
 }
 
+const largeGreetingDialogs = new WeakSet();
+
 function mountGreetingPicker(dialog, list, opening, entries, avatar) {
     const input = dialog.querySelector('#swipe_picker_id_0');
     const nativeGo = dialog.querySelector('.popup-button-ok');
@@ -1848,6 +1853,12 @@ function mountGreetingPicker(dialog, list, opening, entries, avatar) {
     }
     renderGreetingReferences(reference, entries, new Set(entries.filter(entry => !entry.authored).map(entry => entry.key)));
     list.after(panel);
+    // The native large class forces a viewport-sized dialog, even in themes
+    // that override Peek's auto-height rule. Restore it for the native view.
+    if (dialog.classList.contains('large_dialogue_popup')) {
+        largeGreetingDialogs.add(dialog);
+        dialog.classList.remove('large_dialogue_popup');
+    }
     dialog.classList.add('peek-swipe-dialog');
     render();
     buttons[selected]?.focus();
@@ -1856,6 +1867,9 @@ function mountGreetingPicker(dialog, list, opening, entries, avatar) {
 function unmountGreetingPicker(dialog) {
     dialog.querySelector('.peek-swipe-picker')?.remove();
     dialog.classList.remove('peek-swipe-dialog');
+    if (largeGreetingDialogs.delete(dialog)) {
+        dialog.classList.add('large_dialogue_popup');
+    }
 }
 
 function renderGreetingReferences(list, entries, connected) {

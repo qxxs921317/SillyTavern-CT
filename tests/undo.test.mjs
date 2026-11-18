@@ -152,13 +152,13 @@ test('ALT-only translations appear in search in numeric order and are restored b
     assert.deepEqual(clone(h.storage.collectEntityData('char', 'target.png').auto), before);
 });
 
-test('macro preservation takes priority in the prompt without rejecting a changed macro', async () => {
+test('greeting translation prompts prioritize macro preservation and guide natural Korean', async () => {
     const { storage, context } = harness();
     const source = '{{user}} {{getvar:: Greeting }} {{user}}';
-    let calls = 0;
+    const prompts = [];
     context.ConnectionManagerRequestService = {
         async sendRequest(profileId, prompt) {
-            calls++;
+            prompts.push(prompt);
             assert.match(prompt, /Highest-priority rule: Copy every SillyTavern macro/);
             assert.ok(prompt.indexOf('Highest-priority rule:') < prompt.indexOf('Rules:'));
             assert.ok(prompt.includes(source));
@@ -166,7 +166,12 @@ test('macro preservation takes priority in the prompt without rejecting a change
         },
     };
     assert.equal(await storage.translateWithProfile('profile', 'ALT 1', source), '안녕하세요, {{char}}.');
-    assert.equal(calls, 1);
+    await storage.translateWithProfile('profile', 'First Message', source);
+    await storage.translateWithProfile('profile', 'Description', source);
+    assert.equal(prompts.length, 3);
+    assert.match(prompts[0], /write idiomatic Korean dialogue and narration/);
+    assert.match(prompts[1], /Avoid literal phrasing and English word order/);
+    assert.doesNotMatch(prompts[2], /write idiomatic Korean dialogue and narration/);
 });
 
 test('default translation requests only new greetings and explicit retranslation updates automatic fields', async () => {
