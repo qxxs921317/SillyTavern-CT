@@ -871,4 +871,11 @@
     .peek-swipe-layout nav { flex-direction: row; overflow-x: auto; border: 0; border-bottom: 1px solid var(--peek-swipe-border); }
     .peek-swipe-layout nav button { flex: 0 0 auto; }
     .peek-swipe-compare { grid-template-columns: minmax(0, 1fr); }
+    .peek-swipe-compare section {
+        box-sizing: border-box;
+        height: clamp(7rem, 22dvh, 12rem);
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+    }
+    .peek-swipe-compare p { overflow-y: auto; }
 }
