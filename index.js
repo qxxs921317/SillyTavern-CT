@@ -50,7 +50,6 @@ function savedAltGreetings(auto) {
 const defaultSettings = {
     profileId: '',
     listGreetingTranslations: false,
-    chatGreetingTranslations: false,
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
     panelCollapsed: false,
     personaPanelCollapsed: false,
@@ -1249,7 +1248,7 @@ function renderTranslationPanel() {
         if (greetingPanel) greetingPanel.hidden = true;
         const notesPanel = document.getElementById('peek_notes_panel');
         if (notesPanel) notesPanel.style.display = 'none';
-        if (settings.chatGreetingTranslations || settings.listGreetingTranslations) scheduleGreetingDisplay();
+        scheduleGreetingDisplay();
         return;
     }
 
@@ -1345,7 +1344,7 @@ function renderTranslationPanel() {
     } else {
         greetingPanel?.remove();
     }
-    if (settings.chatGreetingTranslations || settings.listGreetingTranslations) scheduleGreetingDisplay();
+    scheduleGreetingDisplay();
 
     // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
@@ -1690,79 +1689,158 @@ function renderNativeGreeting(original, message, translation) {
     nativeGreetingDisplays.set(original, { original: originalNodes, rendered: [...original.childNodes], text, message, swipe: message.swipe_id });
 }
 
-function renderGreetingLinkControl(dialog, message, entries, avatar, enabled) {
+function mountGreetingPicker(dialog, list, opening, entries, avatar) {
     const input = dialog.querySelector('#swipe_picker_id_0');
-    const label = input?.closest('label') ?? dialog.querySelector('label[for="swipe_picker_id_0"]');
-    let control = dialog.querySelector('.peek-greeting-link');
-    if (!enabled || !label || input.disabled) {
-        control?.remove();
-        return;
-    }
-    if (!control) {
-        control = document.createElement('div');
-        control.className = 'peek-greeting-link';
-        label.after(control);
-        input.addEventListener('input', scheduleGreetingDisplay);
-    }
-    const context = getContext();
-    const metadata = context.chatMetadata;
-    const index = Number(input.value) - 1;
-    const link = activeGreetingLink(message, index, entries, metadata?.peekGreetingLinks, avatar);
-    const candidate = greetingLinkCandidate(message, index, entries);
-    const stale = metadata?.peekGreetingLinks?.[index];
-    const changed = stale?.avatar === avatar && stale.source !== candidate?.source;
-    const statusText = link ? (link.confirmed ? '직접 연결됨' : '원문 일치') : changed ? '원문 변경' : candidate?.status;
-    const signature = JSON.stringify([index, candidate?.entry.key, candidate?.record.text, candidate?.source, statusText, candidate?.direct, link?.text]);
-    if (signature === control.dataset.state) return;
-    control.dataset.state = signature;
-    control.replaceChildren();
-    if (!metadata || (!candidate && !link)) return;
-    const status = document.createElement('small');
-    status.textContent = statusText;
-    const confirm = !link && (candidate.direct || statusText !== '원문 일치');
-    const button = greetingButton(link ? '번역 해제' : confirm ? '연결 확인' : '번역 적용', async () => {
-        button.disabled = true;
+    const nativeGo = dialog.querySelector('.popup-button-ok');
+    const nativeClose = dialog.querySelector('.popup-button-close');
+    const metadata = getContext().chatMetadata;
+    if (!input || !metadata || !opening?.swipes?.length || dialog.dataset.peekNativePicker === 'true'
+        || dialog.querySelector('.peek-swipe-picker')) return;
+    const canGo = nativeGo && !nativeGo.hidden && getComputedStyle(nativeGo).display !== 'none';
+    const panel = document.createElement('section');
+    panel.className = 'peek-swipe-picker';
+    panel.innerHTML = `
+        <header class="peek-swipe-top"><h3>Peek · 그리팅 스와이프</h3><div></div></header>
+        <div class="peek-swipe-layout">
+            <nav aria-label="실제 스와이프"></nav>
+            <div class="peek-swipe-work">
+                <div class="peek-swipe-title"><strong></strong><small role="status"></small></div>
+                <label>연결할 저장본<select></select></label>
+                <div class="peek-swipe-compare">
+                    <section><small>현재 원문</small><p></p></section>
+                    <section><small>저장된 번역</small><p></p></section>
+                </div>
+                <div class="peek-swipe-references"></div>
+            </div>
+        </div>
+        <footer><small role="status"></small><div></div></footer>`;
+    const choices = entries.filter(entry => !entry.authored).flatMap(entry =>
+        [[entry.direct, true], [entry.automatic, false]]
+            .filter(([record]) => record?.text)
+            .map(([record, direct]) => ({ entry, record, direct })));
+    const selection = new Map();
+    let saving = false;
+    let selected = Math.min(opening.swipes.length - 1, Math.max(0, Number(input.value) - 1 || 0));
+    const select = panel.querySelector('select');
+    select.add(new Option('저장본 선택', ''));
+    choices.forEach(({ entry, direct }, index) => {
+        select.add(new Option(`${entry.label} · ${direct ? '직접 추가' : '자동 번역'}`, String(index)));
+    });
+    const header = panel.querySelector('header div');
+    const nav = panel.querySelector('nav');
+    const [sourceBody, translatedBody] = panel.querySelectorAll('.peek-swipe-compare p');
+    const reference = panel.querySelector('.peek-swipe-references');
+    const notice = panel.querySelector('footer small');
+    const title = panel.querySelector('.peek-swipe-title strong');
+    const status = panel.querySelector('.peek-swipe-title small');
+    const footer = panel.querySelector('footer div');
+    const validContext = () => chat[0] === opening && getCurrentCharKey() === avatar && getContext().chatMetadata === metadata;
+    header.append(
+        greetingButton('기본 목록', () => {
+            dialog.dataset.peekNativePicker = 'true';
+            unmountGreetingPicker(dialog);
+            input.focus();
+        }),
+        greetingButton('닫기', () => nativeClose?.click()),
+    );
+    const go = greetingButton('', () => {
+        if (!canGo || saving || !validContext()) return;
+        input.value = String(selected + 1);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        nativeGo.click();
+    });
+    const apply = greetingButton('', async () => {
+        const index = selected;
+        const source = swipeOriginal(opening, index);
+        if (!source || saving || !validContext()) return;
+        const existing = activeGreetingLink(opening, index, entries, metadata.peekGreetingLinks, avatar);
+        const choice = choices[select.value === '' ? -1 : Number(select.value)];
+        if (!existing && !choice) return;
+        const links = metadata.peekGreetingLinks ??= {};
+        const previous = links[index];
+        const next = existing ? undefined : {
+            avatar, source, key: choice.entry.key, text: choice.record.text, direct: choice.direct,
+            confirmed: choice.direct || status.textContent !== '원문 일치',
+        };
+        if (existing) delete links[index];
+        else links[index] = next;
+        saving = true;
+        render();
+        refreshGreetingDisplay();
         try {
-            if (confirm) {
-                const accepted = await Popup.show.confirm('이 원문에 연결', `
-                    <div class="peek-greeting-comparison">
-                        <strong>스와이프 ${index + 1} · 원문</strong>
-                        <pre>${escapeHtml(candidate.source)}</pre>
-                        <strong>${escapeHtml(candidate.entry.label)} · ${candidate.direct ? '직접 추가' : '자동 번역'}</strong>
-                        <pre>${escapeHtml(candidate.record.text)}</pre>
-                    </div>`, { okButton: '이 원문에 연결', cancelButton: '취소' });
-                if (!accepted) return;
-            }
-            const currentContext = getContext();
-            if (currentContext.chatMetadata !== metadata || chat[0] !== message || getCurrentCharKey() !== avatar
-                || Number(input.value) - 1 !== index || swipeOriginal(message, index) !== (link?.source ?? candidate?.source)) return;
-            const links = metadata.peekGreetingLinks ??= {};
-            if (link) delete links[index];
-            else links[index] = {
-                avatar, source: candidate.source, key: candidate.entry.key,
-                text: candidate.record.text, direct: candidate.direct, confirmed: confirm,
-            };
-            refreshGreetingDisplay();
-            await currentContext.saveMetadata();
+            await getContext().saveMetadata();
+            notice.textContent = existing ? '번역 연결을 해제했어요.' : `스와이프 #${index + 1}에 번역을 연결했어요.`;
         } catch (error) {
-            toastr.error(`연결 저장 실패: ${error.message}`, EXT_NAME);
+            if (links[index] === next) {
+                if (previous) links[index] = previous;
+                else delete links[index];
+            }
+            notice.textContent = `연결 저장 실패: ${error.message}`;
+            refreshGreetingDisplay();
         } finally {
-            button.disabled = false;
+            saving = false;
+            render();
         }
     });
-    control.append(status, button);
+    footer.append(apply, go);
+    const buttons = opening.swipes.map((_, index) => {
+        const button = greetingButton('', () => {
+            selected = index;
+            notice.textContent = '';
+            render();
+        });
+        nav.append(button);
+        return button;
+    });
+    select.addEventListener('change', () => {
+        selection.set(selected, select.value);
+        render();
+    });
+    function render() {
+        const links = metadata.peekGreetingLinks;
+        const current = Number(opening.swipe_id ?? 0);
+        const source = swipeOriginal(opening, selected);
+        const link = activeGreetingLink(opening, selected, entries, links, avatar);
+        const suggestion = greetingLinkCandidate(opening, selected, entries);
+        const preferred = link
+            ? choices.findIndex(choice => choice.entry.key === link.key && choice.direct === link.direct)
+            : choices.findIndex(choice => choice.record === suggestion?.record);
+        select.value = link || !selection.has(selected) ? (preferred < 0 ? '' : String(preferred)) : selection.get(selected);
+        select.disabled = !!link || !source;
+        const choice = choices[select.value === '' ? -1 : Number(select.value)];
+        const changed = links?.[selected]?.avatar === avatar && links[selected].source !== source;
+        const matches = choice?.record.source && sameGreetingSource(choice.record.source, source);
+        const ambiguous = matches && choices.some(other => other.entry.key !== choice.entry.key
+            && sameGreetingSource(other.record.source, source));
+        status.textContent = link ? (link.confirmed ? '직접 연결됨' : '원문 일치')
+            : !source ? '연결할 수 없는 스와이프'
+                : !choice ? '저장본 미선택'
+                    : changed ? '원문 변경' : ambiguous ? '원문 중복'
+                        : !choice.record.source ? '원문 기록 없음' : matches ? '원문 일치' : '원문 변경';
+        status.classList.toggle('peek-swipe-matched', !!link || status.textContent === '원문 일치');
+        title.textContent = `스와이프 #${selected + 1}${selected === current ? ' · 현재' : ''}`;
+        sourceBody.textContent = opening.swipes[selected] ?? '';
+        translatedBody.textContent = choice ? displayGreetingText(choice.record.text) : '연결할 저장본을 선택해 주세요.';
+        apply.textContent = link ? '번역 해제' : choice && !choice.direct && status.textContent === '원문 일치' ? '번역 적용' : '이 원문에 연결';
+        apply.disabled = saving || !source || (!choice && !link);
+        go.textContent = `#${selected + 1}으로 이동`;
+        go.disabled = saving || !canGo;
+        buttons.forEach((button, index) => {
+            const saved = activeGreetingLink(opening, index, entries, links, avatar);
+            button.textContent = `#${index + 1}${saved ? ' · 연결됨' : index === current ? ' · 현재' : ''}`;
+            button.setAttribute('aria-pressed', String(index === selected));
+        });
+    }
+    renderGreetingReferences(reference, entries, new Set(entries.filter(entry => !entry.authored).map(entry => entry.key)));
+    list.after(panel);
+    dialog.classList.add('peek-swipe-dialog');
+    render();
+    buttons[selected]?.focus();
 }
 
-function restoreGreetingPreview(preview) {
-    const original = preview.querySelector('.peek-greeting-preview-source');
-    if (original) original.replaceWith(...original.childNodes);
-    preview.querySelector('.peek-greeting-overlay')?.remove();
-    preview.classList.remove('peek-greeting-preview');
-}
-
-function clearGreetingOverlays(root) {
-    root.querySelectorAll('.peek-greeting-preview').forEach(restoreGreetingPreview);
-    root.querySelectorAll('.peek-greeting-overlay, .peek-greeting-reference').forEach(element => element.remove());
+function unmountGreetingPicker(dialog) {
+    dialog.querySelector('.peek-swipe-picker')?.remove();
+    dialog.classList.remove('peek-swipe-dialog');
 }
 
 function renderGreetingReferences(list, entries, connected) {
@@ -1807,19 +1885,18 @@ function refreshGreetingDisplay() {
     const avatar = getCurrentCharKey();
     const char = getCurrentChar();
     const original = document.querySelector('#chat .mes[mesid="0"] .mes_text');
-    const canDisplay = (settings.chatGreetingTranslations || settings.listGreetingTranslations)
-        && avatar && char && !getContext().groupId;
+    const canDisplay = avatar && char && !getContext().groupId;
     if (!canDisplay) {
         renderNativeGreeting(original, chat[0]);
-        document.querySelectorAll('.peek-greeting-link').forEach(control => control.remove());
-        clearGreetingOverlays(document);
+        document.querySelectorAll('.peek-swipe-dialog').forEach(unmountGreetingPicker);
+        document.querySelectorAll('.peek-greeting-reference').forEach(reference => reference.remove());
         return;
     }
     if (!isEntityLoaded('char', avatar)) {
         // The character panel already loads the same entity on chat changes.
         renderNativeGreeting(original, chat[0]);
-        document.querySelectorAll('.peek-greeting-link').forEach(control => control.remove());
-        clearGreetingOverlays(document);
+        document.querySelectorAll('.peek-swipe-dialog').forEach(unmountGreetingPicker);
+        document.querySelectorAll('.peek-greeting-reference').forEach(reference => reference.remove());
         return;
     }
     const entries = greetingEntries(char, peekData.translations[avatar], peekData.greetingAdditions[avatar]);
@@ -1835,51 +1912,16 @@ function refreshGreetingDisplay() {
         chatRow?.querySelector('.peek-greeting-reference')?.remove();
     }
     const links = getContext().chatMetadata?.peekGreetingLinks;
-    const selected = settings.chatGreetingTranslations
-        ? activeGreetingLink(opening, currentSwipe, entries, links, avatar) : undefined;
-    renderNativeGreeting(original, opening, selected);
+    renderNativeGreeting(original, opening, activeGreetingLink(opening, currentSwipe, entries, links, avatar));
 
     for (const list of document.querySelectorAll('.swipe_picker_div')) {
         const dialog = list.closest('dialog');
-        const supported = dialog?.open && dialog.querySelector('[id="swipe_picker_id_0"]');
-        if (dialog) renderGreetingLinkControl(dialog, opening, entries, avatar, supported && settings.chatGreetingTranslations);
-        if (!settings.listGreetingTranslations || !supported) {
-            clearGreetingOverlays(list);
-            continue;
-        }
-        const connected = new Set();
-        for (const row of list.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
-            const index = Number(row.dataset.swipeId);
-            const entry = resolveGreetingSwipe(opening, index, entries);
-            const linked = activeGreetingLink(opening, index, entries, links, avatar);
-            const candidate = greetingLinkCandidate(opening, index, entries);
-            const translation = linked ?? (candidate?.status === '원문 일치' ? candidate.record : undefined);
-            if (translation && (linked?.key ?? candidate?.entry.key)) connected.add(linked?.key ?? candidate.entry.key);
-            else if (entry && !entry.direct?.text && !entry.automatic?.text) connected.add(entry.key);
-            // Place the translation inside the preview so the host's expand,
-            // collapse, and selection behavior still applies to the row.
-            const preview = row.querySelector('.select_chat_block_mes');
-            if (!preview) continue;
-            let overlay = preview.querySelector('.peek-greeting-overlay');
-            if (!translation) {
-                restoreGreetingPreview(preview);
-                continue;
-            }
-            if (!overlay) {
-                const source = document.createElement('span');
-                source.className = 'peek-greeting-preview-source';
-                source.hidden = true;
-                source.append(...preview.childNodes);
-                overlay = document.createElement('span');
-                overlay.className = 'peek-greeting-overlay';
-                preview.append(source, overlay);
-            }
-            const text = displayGreetingText(translation.text);
-            if (overlay.textContent !== text) overlay.textContent = text;
-            preview.classList.add('peek-greeting-preview');
-        }
-        if (connected.size || opening && list.querySelector('.swipe_picker_block')) {
-            renderGreetingReferences(list, entries, connected);
+        if (!dialog) continue;
+        if (!dialog.open || !settings.listGreetingTranslations) {
+            unmountGreetingPicker(dialog);
+            delete dialog.dataset.peekNativePicker;
+        } else {
+            mountGreetingPicker(dialog, list, opening, entries, avatar);
         }
     }
 }
@@ -1887,11 +1929,9 @@ function refreshGreetingDisplay() {
 function observeGreetingDisplay() {
     const selector = '.swipe_picker_div, .mes[mesid="0"]';
     const observer = new MutationObserver(records => {
-        const settings = loadSettings();
-        if (!settings.chatGreetingTranslations && !settings.listGreetingTranslations) return;
         const relevant = records.some(record => {
             const target = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
-            if (target?.closest('.peek-greeting-overlay, .peek-greeting-reference, .peek-greeting-link')) return false;
+            if (target?.closest('.peek-greeting-reference, .peek-swipe-picker')) return false;
             if (target?.closest(selector) || target?.matches('dialog') && target.querySelector('.swipe_picker_div')) return true;
             return [...record.addedNodes].some(node => node.nodeType === Node.ELEMENT_NODE
                 && (node.matches(selector) || node.querySelector(selector)));
@@ -3086,7 +3126,6 @@ function renderSettingsPanel() {
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
                         <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="listGreetingTranslations" ${settings.listGreetingTranslations ? 'checked' : ''}> 그리팅·스와이프 목록에 번역 표시</label>
-                        <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="chatGreetingTranslations" ${settings.chatGreetingTranslations ? 'checked' : ''}> 채팅에 그리팅 번역 표시</label>
 
                         <div class="peek-status" id="peek_status"></div>
 

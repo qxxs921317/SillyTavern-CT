@@ -749,31 +749,106 @@
 }
 #peek_greeting_panel .peek-field-header { flex-wrap: wrap; }
 #peek_greeting_panel .peek-greeting-add { margin-left: 4px; }
-.peek-greeting-overlay { white-space: pre-wrap; overflow-wrap: anywhere; }
-.peek-greeting-preview-source { display: none !important; }
-.select_chat_block_mes .peek-greeting-overlay { white-space: inherit; }
 .peek-greeting-reference {
     padding: 8px;
     border-top: 1px solid var(--SmartThemeBorderColor);
 }
 .peek-greeting-reference p { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.peek-greeting-link {
-    display: inline-flex;
+.peek-swipe-dialog .swipe_picker_header,
+.peek-swipe-dialog .swipe_picker_div,
+.peek-swipe-dialog .popup-controls {
+    display: none !important;
+}
+
+.peek-swipe-picker {
+    --peek-swipe-border: var(--SmartThemeBorderColor);
+    --peek-swipe-accent: var(--SmartThemeQuoteColor, currentColor);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+    flex: 1;
+    text-align: left;
+    border: 1px solid var(--peek-swipe-border);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.peek-swipe-top,
+.peek-swipe-picker footer,
+.peek-swipe-title {
+    display: flex;
+    justify-content: space-between;
     align-items: center;
     flex-wrap: wrap;
-    gap: 4px 8px;
+    gap: 8px;
+    padding: 10px 14px;
 }
-.peek-greeting-link small { opacity: 0.75; }
-.peek-greeting-link button {
+
+.peek-swipe-top { border-bottom: 1px solid var(--peek-swipe-border); }
+.peek-swipe-top h3 { margin: 0; font-size: 1em; }
+.peek-swipe-top > div, .peek-swipe-picker footer > div { display: flex; flex-wrap: wrap; gap: 6px; }
+.peek-swipe-picker footer { border-top: 1px solid var(--peek-swipe-border); }
+.peek-swipe-picker footer > div { margin-left: auto; }
+.peek-swipe-picker small { opacity: 0.8; }
+
+.peek-swipe-layout {
+    display: grid;
+    grid-template-columns: minmax(105px, 23%) minmax(0, 1fr);
+    min-height: 0;
+    overflow: auto;
+}
+
+.peek-swipe-layout nav {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    padding: 9px;
+    border-right: 1px solid var(--peek-swipe-border);
+}
+
+.peek-swipe-picker button,
+.peek-swipe-picker select {
     font: inherit;
-    font-size: 0.85em;
     color: inherit;
-    background: var(--black30a, transparent);
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 4px;
-    padding: 3px 7px;
-    cursor: pointer;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--peek-swipe-border);
+    border-radius: 6px;
+    padding: 4px 8px;
 }
-.peek-greeting-comparison { text-align: left; }
-.peek-greeting-comparison pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.peek-swipe-picker button { cursor: pointer; font-size: 0.85em; }
+.peek-swipe-picker button:disabled { cursor: default; opacity: 0.5; }
+.peek-swipe-picker button:focus-visible,
+.peek-swipe-picker select:focus-visible { outline: 2px solid var(--peek-swipe-accent); outline-offset: 1px; }
+.peek-swipe-picker nav button { text-align: left; }
+.peek-swipe-picker nav button[aria-pressed="true"],
+.peek-swipe-picker footer button:last-child {
+    border-color: var(--peek-swipe-accent);
+    background: var(--white10a);
+    font-weight: 600;
+}
+.peek-swipe-work { min-width: 0; padding: 10px 14px; }
+.peek-swipe-title { padding: 0 0 8px; }
+.peek-swipe-title small {
+    padding: 2px 7px;
+    border: 1px solid var(--peek-swipe-border);
+    border-radius: 12px;
+}
+.peek-swipe-title .peek-swipe-matched { border-color: var(--peek-swipe-accent); color: var(--peek-swipe-accent); }
+.peek-swipe-work label { display: block; margin-bottom: 8px; }
+.peek-swipe-picker select { display: block; width: 100%; margin: 4px 0 0; }
+.peek-swipe-compare { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.peek-swipe-compare section { border: 1px solid var(--peek-swipe-border); border-radius: 8px; padding: 8px; }
+.peek-swipe-compare p { margin: 4px 0 0; max-height: 35vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.peek-swipe-references .peek-greeting-reference { margin-top: 8px; }
+
+@media (max-width: 620px) {
+    .peek-swipe-layout { grid-template-columns: minmax(0, 1fr); }
+    .peek-swipe-layout nav { flex-direction: row; overflow-x: auto; border: 0; border-bottom: 1px solid var(--peek-swipe-border); }
+    .peek-swipe-layout nav button { flex: 0 0 auto; }
+    .peek-swipe-compare { grid-template-columns: minmax(0, 1fr); }
+}
