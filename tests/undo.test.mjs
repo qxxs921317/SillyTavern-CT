@@ -39,6 +39,7 @@ function harness() {
         loadSettings, applyEntityData, collectEntityData, persistEntity, replaceAutoWithUndo,
         undoAutoImport, readUndoBackup, undoFileName, entityFileName,
         savedAutoEntries, characterTranslationTargets, translateWithProfile, runTranslation,
+        greetingEntries, resolveGreetingSwipe, preferredGreeting, displayGreetingText, buildBackupObject,
         clearCache: () => undoBackups.clear(),
     };`, context);
     const storage = context.storage;
@@ -184,4 +185,45 @@ test('translating only ALT keeps the existing default greeting on disk', async (
     const { auto } = h.files.get(h.storage.entityFileName('char', 'target.png'));
     assert.deepEqual(auto.first_mes, firstMes);
     assert.equal(auto.alt_greeting_1.text, '새 ALT 번역');
+});
+
+test('direct additions and authored greetings persist separately from searched and restored auto translations', async () => {
+    const h = harness();
+    const key = 'target.png';
+    const greetings = { alt_greeting_1: { text: '직접 추가', source: 'ALT' }, extra_1: { text: '직접 작성' } };
+    h.storage.applyEntityData('char', key, { auto: { alt_greeting_1: { text: '자동 번역' } }, greetings });
+    await h.storage.persistEntity('char', key);
+    const saved = h.files.get(h.storage.entityFileName('char', key));
+    assert.deepEqual(saved.greetings, greetings);
+    assert.deepEqual(clone((await h.storage.savedAutoEntries('char')).entries[0].records), [['ALT 1', '자동 번역']]);
+    await h.storage.replaceAutoWithUndo('char', key, {});
+    await h.storage.undoAutoImport('char', key);
+    assert.deepEqual(clone(h.storage.collectEntityData('char', key).greetings), greetings);
+    assert.deepEqual(clone((await h.storage.buildBackupObject()).data.greetingAdditions[key]), greetings);
+    h.storage.applyEntityData('char', key, { greetings });
+    await h.storage.persistEntity('char', key);
+    assert.deepEqual(h.files.get(h.storage.entityFileName('char', key)).greetings, greetings);
+});
+
+test('swipe resolution uses original text, prefers direct additions, and skips ambiguous, stale and generated matches', () => {
+    const h = harness();
+    h.context.name1 = '독자';
+    h.context.this_chid = 0;
+    h.context.characters.push({ name: '테스트' });
+    const { greetingEntries, resolveGreetingSwipe, preferredGreeting } = h.storage;
+    const char = { first_mes: 'Hello {{user}}', data: { alternate_greetings: ['ALT', 'Duplicate', 'Duplicate'] } };
+    const entries = greetingEntries(char,
+        { first_mes: { text: '안녕' }, alt_greeting_1: { text: '오래된 자동 번역', source: 'Old' }, alt_greeting_9: { text: '남은 자동 번역' } },
+        { alt_greeting_1: { text: '직접 추가', source: 'ALT' }, alt_greeting_8: { text: '남은 직접 추가' }, extra_1: { text: '직접 작성' } });
+    const message = { mes: 'ALT', swipe_id: 0, swipes: ['ALT', 'Hello 독자', 'Duplicate', '직접 작성', 'ALT'], swipe_info: [{}, {}, {}, {}, { gen_started: 1 }] };
+    assert.equal(preferredGreeting(resolveGreetingSwipe(message, 0, entries)).text, '직접 추가');
+    assert.equal(preferredGreeting(resolveGreetingSwipe(message, 1, entries)).text, '안녕');
+    assert.equal(resolveGreetingSwipe(message, 2, entries), undefined);
+    assert.equal(resolveGreetingSwipe(message, 3, entries), undefined);
+    assert.equal(resolveGreetingSwipe(message, 4, entries), undefined);
+    assert.deepEqual(clone(entries.slice(-3).map(entry => entry.label)), ['ALT 8', 'ALT 9', '추가 1']);
+    assert.equal(preferredGreeting({ source: 'ALT', automatic: { text: 'stale', source: 'Old' } }), undefined);
+    assert.equal(h.storage.displayGreetingText('{{user}} · {{char}} {{setvar::x::y}} {{newline}}'), '독자 · 테스트 {{setvar::x::y}} \n');
+    assert.equal(message.mes, 'ALT');
+    assert.equal(message.swipes[1], 'Hello 독자');
 });

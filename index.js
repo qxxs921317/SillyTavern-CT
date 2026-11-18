@@ -4,7 +4,7 @@
  */
 
 import { extension_settings, getContext } from '../../../extensions.js';
-import { saveSettingsDebounced, eventSource, event_types, characters, this_chid, user_avatar, name1 } from '../../../../script.js';
+import { saveSettingsDebounced, eventSource, event_types, characters, this_chid, user_avatar, name1, chat } from '../../../../script.js';
 import { Popup, POPUP_TYPE } from '../../../popup.js';
 import { power_user } from '../../../power-user.js';
 
@@ -49,6 +49,8 @@ function savedAltGreetings(auto) {
 // 기본 설정
 const defaultSettings = {
     profileId: '',
+    listGreetingTranslations: false,
+    chatGreetingTranslations: false,
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
     panelCollapsed: false,
     personaPanelCollapsed: false,
@@ -104,11 +106,12 @@ const peekData = {
     personaManualTranslations: {},
     notes: {},
     personaNotes: {},
+    greetingAdditions: {},
 };
 
 // kind별 섹션 매핑
 const SECTIONS = {
-    char: { auto: 'translations', manual: 'manualTranslations', note: 'notes' },
+    char: { auto: 'translations', manual: 'manualTranslations', note: 'notes', greetings: 'greetingAdditions' },
     persona: { auto: 'personaTranslations', manual: 'personaManualTranslations', note: 'personaNotes' },
 };
 
@@ -207,7 +210,7 @@ async function removeEntityFile(fileName) {
  */
 function applyEntityData(kind, key, obj) {
     const sec = SECTIONS[kind];
-    const slots = [['auto', sec.auto], ['manual', sec.manual], ['note', sec.note]];
+    const slots = Object.entries(sec);
     for (const [slot, section] of slots) {
         const val = obj?.[slot];
         if (val === undefined || val === null) delete peekData[section][key];
@@ -224,12 +227,13 @@ function collectEntityData(kind, key) {
         auto: peekData[sec.auto][key] ?? null,
         manual: peekData[sec.manual][key] ?? null,
         note: peekData[sec.note][key] ?? null,
+        ...(sec.greetings && peekData[sec.greetings][key] ? { greetings: peekData[sec.greetings][key] } : {}),
         updatedAt: Date.now(),
     };
 }
 
 function isEntityEmpty(payload) {
-    return !payload.auto && !payload.manual && !payload.note;
+    return !payload.auto && !payload.manual && !payload.note && !payload.greetings;
 }
 
 /**
@@ -241,8 +245,9 @@ function legacyEntityData(kind, key) {
     const auto = raw[sec.auto]?.[key] ?? null;
     const manual = raw[sec.manual]?.[key] ?? null;
     const note = raw[sec.note]?.[key] ?? null;
-    if (!auto && !manual && !note) return null;
-    return { auto, manual, note };
+    const greetings = sec.greetings ? raw[sec.greetings]?.[key] : null;
+    if (!auto && !manual && !note && !greetings) return null;
+    return { auto, manual, note, greetings };
 }
 
 /**
@@ -358,7 +363,7 @@ async function persistEntityFile(kind, key) {
 function persistLegacy(kind, key) {
     const raw = loadSettings();
     const sec = SECTIONS[kind];
-    for (const section of [sec.auto, sec.manual, sec.note]) {
+    for (const section of Object.values(sec)) {
         if (!raw[section]) raw[section] = {};
         const val = peekData[section][key];
         if (val === undefined) delete raw[section][key];
@@ -648,6 +653,7 @@ async function runTranslation() {
             );
             translatedFields[field.key] = {
                 text: translated,
+                ...((field.key === 'first_mes' || field.key.startsWith(ALT_KEY_PREFIX)) ? { source: field.source } : {}),
                 translatedAt: Date.now(),
             };
             success++;
@@ -1243,6 +1249,7 @@ function renderTranslationPanel() {
         if (greetingPanel) greetingPanel.hidden = true;
         const notesPanel = document.getElementById('peek_notes_panel');
         if (notesPanel) notesPanel.style.display = 'none';
+        if (settings.chatGreetingTranslations || settings.listGreetingTranslations) scheduleGreetingDisplay();
         return;
     }
 
@@ -1318,33 +1325,27 @@ function renderTranslationPanel() {
         }
     }
 
-    // ALT 번역이 있으면 기본 그리팅도 별도 카드에 표시한다.
-    const greetings = savedAltGreetings(charTranslations);
+    const greetings = greetingEntries(char, charTranslations, peekData.greetingAdditions[charKey]);
+    const fields = TRANSLATABLE_FIELDS.filter(field => field.key !== 'first_mes' && charTranslations[field.key]?.text);
+    autoContent.replaceChildren();
     if (!hasAuto) {
         autoContent.innerHTML = `<div class="peek-empty">아직 자동 번역이 없어.<br>캐릭터 설명 옆 👀 버튼을 눌러서 번역해봐</div>`;
-    } else {
-        autoContent.replaceChildren();
-        for (const field of TRANSLATABLE_FIELDS) {
-            if (field.key === 'first_mes' && greetings.length) continue;
-            const translation = charTranslations[field.key];
-            if (translation?.text) {
-                autoContent.append(createCharacterTranslationBlock(charKey, field.key, `${field.label} · ${field.desc}`, translation));
-            }
-        }
     }
-    if (!greetings.length) greetingPanel?.remove();
-    else if (activeTab !== 'auto') {
-        if (greetingPanel) greetingPanel.hidden = true;
-    } else {
-        if (charTranslations.first_mes?.text) greetings.unshift({ key: 'first_mes', label: '기본' });
-        const sameCharacter = greetingPanel?.dataset.peekKey === charKey;
-        const priorIndex = greetingPanel?.querySelector('.peek-greeting-index');
-        const selected = sameCharacter ? priorIndex?.querySelector('[aria-pressed="true"]')?.dataset.field : undefined;
-        const scrollLeft = sameCharacter ? priorIndex?.scrollLeft ?? 0 : 0;
-        const card = createGreetingIndex(charKey, charTranslations, greetings, selected, scrollLeft);
+    for (const field of fields) {
+        autoContent.append(createCharacterTranslationBlock(charKey, field.key, `${field.label} · ${field.desc}`, charTranslations[field.key]));
+    }
+
+    const priorIndex = greetingPanel?.querySelector('.peek-greeting-index');
+    const sameCharacter = greetingPanel?.dataset.peekKey === charKey;
+    if (greetings.length) {
+        const selected = sameCharacter ? greetingPanel.dataset.field : undefined;
+        const card = createGreetingIndex(charKey, greetings, selected, sameCharacter ? priorIndex?.scrollLeft ?? 0 : 0, sameCharacter && greetingPanel.dataset.expanded === 'true');
         greetingPanel?.remove();
         panel.after(card);
+    } else {
+        greetingPanel?.remove();
     }
+    if (settings.chatGreetingTranslations || settings.listGreetingTranslations) scheduleGreetingDisplay();
 
     // 수동 탭 textarea - 캐릭터 키 바뀐 경우만 value 갱신
     const manualTextarea = panel.querySelector('.peek-manual-textarea');
@@ -1393,11 +1394,53 @@ function createCharacterTranslationBlock(charKey, field, label, translation) {
     return block;
 }
 
-function createGreetingIndex(charKey, translations, greetings, selected, scrollLeft) {
+function greetingEntries(char, auto = {}, additions = {}) {
+    const base = char?.data?.first_mes ?? char?.first_mes;
+    const alts = char?.data?.alternate_greetings ?? char?.alternate_greetings;
+    const originals = new Map([['first_mes', { key: 'first_mes', label: '기본', source: base }]]);
+    if (Array.isArray(alts)) {
+        alts.forEach((source, index) => {
+            const number = index + 1;
+            const key = ALT_KEY_PREFIX + number;
+            originals.set(key, { key, label: `ALT ${number}`, source });
+        });
+    }
+    for (const entry of savedAltGreetings(auto)) {
+        if (!originals.has(entry.key)) originals.set(entry.key, entry);
+    }
+    for (const key of Object.keys(additions)) {
+        const match = /^(alt_greeting_|extra_)([1-9]\d*)$/.exec(key);
+        if (!match || originals.has(key)) continue;
+        const authored = match[1] === 'extra_';
+        originals.set(key, { key, authored, label: authored ? `추가 ${match[2]}` : `ALT ${match[2]}` });
+    }
+    const number = entry => entry.key === 'first_mes' ? 0 : Number(entry.key.split('_').at(-1));
+    return [...originals.values()]
+        .filter(entry => String(entry.source ?? '').trim() || auto[entry.key]?.text || additions[entry.key]?.text)
+        .sort((a, b) => Number(Boolean(a.authored)) - Number(Boolean(b.authored))
+            || number(a) - number(b))
+        .map(entry => ({
+            ...entry,
+            automatic: auto[entry.key],
+            direct: additions[entry.key],
+        }));
+}
+
+function greetingButton(label, action) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'peek-tab';
+    button.textContent = label;
+    button.addEventListener('click', action);
+    return button;
+}
+
+function createGreetingIndex(charKey, greetings, selected, scrollLeft, expanded = false) {
     const section = document.createElement('section');
     section.id = 'peek_greeting_panel';
     section.dataset.peekKey = charKey;
     section.setAttribute('aria-label', 'First Message');
+    const hasContent = greetings.some(entry => entry.automatic?.text || entry.direct?.text);
     section.innerHTML = `
         <div class="peek-greeting-heading"><strong class="peek-field-label">First Message</strong><span aria-live="polite"></span></div>
         <div class="peek-greeting-navigation">
@@ -1407,58 +1450,347 @@ function createGreetingIndex(charKey, translations, greetings, selected, scrollL
         </div>
         <div class="peek-greeting-body"></div>
     `;
+    const heading = section.querySelector('.peek-greeting-heading');
+    const position = heading.querySelector('span');
+    const navigation = section.querySelector('.peek-greeting-navigation');
     const index = section.querySelector('.peek-greeting-index');
-    const position = section.querySelector('.peek-greeting-heading span');
     const body = section.querySelector('.peek-greeting-body');
     const previous = section.querySelector('.peek-greeting-previous');
     const next = section.querySelector('.peek-greeting-next');
+    const add = greetingButton('+ 새 그리팅', () => editGreeting(null));
+    add.classList.add('peek-greeting-add');
+    navigation.append(add);
 
-    const buttons = greetings.map(({ key, label }, number) => {
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'peek-tab';
-        button.dataset.field = key;
-        button.textContent = label;
+    const buttons = greetings.map((entry, number) => {
+        const button = greetingButton(entry.label, () => select(number));
+        if (entry.direct?.text && !entry.authored) {
+            button.classList.add('peek-greeting-has-direct');
+            button.setAttribute('aria-label', `${entry.label} · 직접 추가`);
+        }
         button.setAttribute('aria-pressed', 'false');
-        button.addEventListener('click', () => select(number));
         index.append(button);
         return button;
     });
-    let active;
+
+    let activeNumber = -1;
+    const showEntry = (entry, showAutomatic = false) => {
+        const text = showAutomatic ? entry.automatic : entry.direct?.text ? entry.direct : entry.automatic;
+        const direct = text && text === entry.direct;
+        const label = entry.label + (text ? ` · ${entry.authored ? '직접 작성' : direct ? '직접 추가' : '자동 번역'}` : '');
+        const block = text && !direct
+            ? createCharacterTranslationBlock(charKey, entry.key, label, text)
+            : document.createElement('div');
+        if (!text || direct) {
+            block.className = 'peek-field-block';
+            const header = document.createElement('div');
+            header.className = 'peek-field-header';
+            const title = document.createElement('span');
+            title.className = 'peek-field-label';
+            title.textContent = label;
+            header.append(title);
+            if (text) {
+                const content = document.createElement('div');
+                content.className = 'peek-field-content';
+                content.textContent = text.text;
+                block.append(header, content);
+            } else {
+                block.append(header);
+            }
+        }
+        const header = block.querySelector('.peek-field-header');
+        if (entry.direct?.text && entry.automatic?.text) {
+            header.append(greetingButton(showAutomatic ? '직접 추가본 보기' : '자동본 보기', () => showEntry(entry, !showAutomatic)));
+        }
+        if (!entry.direct?.text || direct) {
+            header.append(greetingButton(direct ? '수정' : '+ 번역 추가', () => editGreeting(entry)));
+        }
+        if (direct) {
+            const copy = greetingButton('복사', () => copyTextWithFeedback(text.text, copy));
+            header.append(copy);
+        }
+        body.replaceChildren(block);
+    };
+
+    const editGreeting = (entry) => {
+        const editor = document.createElement('div');
+        editor.innerHTML = `<textarea class="text_pole peek-auto-textarea" aria-label="그리팅 내용" placeholder="번역하거나 직접 작성한 내용을 붙여넣어"></textarea>
+            <div class="peek-editor-actions"></div>`;
+        const textarea = editor.querySelector('textarea');
+        textarea.value = entry?.direct?.text ?? '';
+        const save = greetingButton('저장', async () => {
+            const text = textarea.value.trim();
+            if (!text) return;
+            save.disabled = cancel.disabled = true;
+            try {
+                const key = await queueEntityWrite('char', charKey, async () => {
+                    const record = peekData.greetingAdditions[charKey] ??= {};
+                    const last = Object.keys(record).reduce((max, key) => {
+                        const match = /^extra_([1-9]\d*)$/.exec(key);
+                        return match ? Math.max(max, Number(match[1])) : max;
+                    }, 0);
+                    const key = entry?.key ?? `extra_${last + 1}`;
+                    record[key] = { text, ...((entry?.source ?? entry?.direct?.source) ? { source: entry.source ?? entry.direct.source } : {}), updatedAt: Date.now() };
+                    await persistEntityImmediately('char', charKey);
+                    return key;
+                });
+                if (getCurrentCharKey() === charKey) {
+                    const current = document.getElementById('peek_greeting_panel');
+                    if (current?.dataset.peekKey === charKey) current.dataset.field = key;
+                    renderTranslationPanel();
+                }
+            } catch (error) {
+                toastr.error(`저장 실패: ${error.message}`, EXT_NAME);
+            } finally {
+                save.disabled = cancel.disabled = false;
+            }
+        });
+        const cancel = greetingButton('취소', () => select(activeNumber));
+        editor.querySelector('.peek-editor-actions').append(cancel, save);
+        body.replaceChildren(editor);
+        textarea.focus();
+    };
+
     function select(number) {
-        active?.classList.remove('peek-tab-active');
-        active?.setAttribute('aria-pressed', 'false');
-        active = buttons[number];
-        active.classList.add('peek-tab-active');
-        active.setAttribute('aria-pressed', 'true');
-        const { key, label } = greetings[number];
+        if (activeNumber >= 0) {
+            buttons[activeNumber].classList.remove('peek-tab-active');
+            buttons[activeNumber].setAttribute('aria-pressed', 'false');
+        }
+        activeNumber = number;
+        buttons[number].classList.add('peek-tab-active');
+        buttons[number].setAttribute('aria-pressed', 'true');
+        section.dataset.field = greetings[number].key;
         position.textContent = `${number + 1} / ${greetings.length}`;
-        body.replaceChildren(createCharacterTranslationBlock(charKey, key, label, translations[key]));
+        showEntry(greetings[number]);
     }
 
-    select(Math.max(0, greetings.findIndex(greeting => greeting.key === selected)));
-    previous.addEventListener('click', () => index.scrollBy({ left: -index.clientWidth * 0.8, behavior: 'smooth' }));
-    next.addEventListener('click', () => index.scrollBy({ left: index.clientWidth * 0.8, behavior: 'smooth' }));
     const updateArrows = () => {
-        const maxScroll = index.scrollWidth - index.clientWidth;
         previous.disabled = index.scrollLeft <= 1;
-        next.disabled = index.scrollLeft >= maxScroll - 1;
+        next.disabled = index.scrollLeft >= index.scrollWidth - index.clientWidth - 1;
     };
-    index.addEventListener('scroll', updateArrows, { passive: true });
-    requestAnimationFrame(() => {
-        if (!section.isConnected) return;
+    const restoreScroll = () => requestAnimationFrame(() => {
+        if (!section.isConnected || navigation.hidden) return;
         index.scrollLeft = scrollLeft;
         const viewport = index.getBoundingClientRect();
-        const selection = active.getBoundingClientRect();
-        if (selection.left < viewport.left || selection.right > viewport.right) {
-            index.scrollLeft += selection.left - viewport.left;
-        }
+        const selection = buttons[activeNumber].getBoundingClientRect();
+        if (selection.left < viewport.left || selection.right > viewport.right) index.scrollLeft += selection.left - viewport.left;
         updateArrows();
     });
-    // Check overflow on demand after switching tabs or resizing the card panel.
+    previous.addEventListener('click', () => index.scrollBy({ left: -index.clientWidth * 0.8, behavior: 'smooth' }));
+    next.addEventListener('click', () => index.scrollBy({ left: index.clientWidth * 0.8, behavior: 'smooth' }));
+    index.addEventListener('scroll', updateArrows, { passive: true });
     section.addEventListener('pointerenter', updateArrows);
     section.addEventListener('focusin', updateArrows);
+    const chosen = greetings.findIndex(entry => entry.key === selected);
+    const translated = greetings.findIndex(entry => entry.direct?.text || entry.automatic?.text);
+    select(chosen >= 0 ? chosen : Math.max(translated, 0));
+    section.dataset.expanded = String(hasContent || expanded);
+    if (!hasContent && !expanded) {
+        navigation.hidden = body.hidden = position.hidden = true;
+        section.classList.add('peek-greeting-empty');
+        const open = greetingButton('First Message', () => {
+            section.dataset.expanded = 'true';
+            navigation.hidden = body.hidden = position.hidden = false;
+            section.classList.remove('peek-greeting-empty');
+            open.replaceWith(title);
+            restoreScroll();
+            buttons[activeNumber].focus();
+        });
+        open.setAttribute('aria-label', 'First Message · 번역 추가');
+        open.classList.add('peek-greeting-open');
+        const title = heading.querySelector('strong');
+        title.replaceWith(open);
+    }
+    restoreScroll();
     return section;
+}
+
+/**
+ * Expand only local, read-only macros. A second evaluation of a macro such
+ * as setvar, roll, or an extension macro could change state or call a service.
+ */
+function displayGreetingText(text) {
+    const names = { user: name1, char: getCurrentChar()?.name, newline: '\n' };
+    return String(text ?? '').replace(/\{\{\s*(user|char|newline)\s*\}\}/gi,
+        (macro, name) => names[name.toLowerCase()] ?? macro);
+}
+
+function resolveGreetingSwipe(message, index, entries) {
+    if (!message || message.is_user || message.is_system || !Number.isInteger(index) || index < 0
+        || (message.gen_started && !message.swipes?.length) || message.swipe_info?.[index]?.gen_started) return undefined;
+    const swipe = message.swipes?.[index] ?? (index === 0 ? message.mes : undefined);
+    if (typeof swipe !== 'string' || !swipe.trim()) return undefined;
+    const normalize = text => String(text ?? '').replace(/\r\n/g, '\n').trim();
+    const matches = entries.filter(entry => normalize(entry.source)
+        && (normalize(entry.source) === normalize(swipe) || normalize(displayGreetingText(entry.source)) === normalize(swipe)));
+    return matches.length === 1 ? matches[0] : undefined;
+}
+
+function preferredGreeting(entry) {
+    const matchesSource = record => record?.text && (record.source === undefined || record.source === entry?.source);
+    if (matchesSource(entry?.direct)) return entry.direct;
+    if (matchesSource(entry?.automatic)) return entry.automatic;
+    return undefined;
+}
+
+function showGreetingOverlay(original, translation) {
+    if (!original) return;
+    let overlay = original.nextElementSibling;
+    if (!overlay?.classList.contains('peek-greeting-overlay')) overlay = null;
+    if (!translation?.text) {
+        overlay?.remove();
+        original.classList.remove('peek-greeting-original');
+        return;
+    }
+    if (!overlay) {
+        overlay = document.createElement('div');
+        overlay.className = 'peek-greeting-overlay';
+        original.after(overlay);
+    }
+    const text = displayGreetingText(translation.text);
+    if (overlay.textContent !== text) overlay.textContent = text;
+    original.classList.add('peek-greeting-original');
+}
+
+function restoreGreetingPreview(preview) {
+    const original = preview.querySelector('.peek-greeting-preview-source');
+    if (original) original.replaceWith(...original.childNodes);
+    preview.querySelector('.peek-greeting-overlay')?.remove();
+    preview.classList.remove('peek-greeting-preview');
+}
+
+function clearGreetingOverlays(root) {
+    root.querySelectorAll('.peek-greeting-preview').forEach(restoreGreetingPreview);
+    root.querySelectorAll('.peek-greeting-overlay, .peek-greeting-reference').forEach(element => element.remove());
+    root.querySelectorAll('.peek-greeting-original').forEach(element => element.classList.remove('peek-greeting-original'));
+}
+
+function renderGreetingReferences(list, entries, connected) {
+    const detached = entries.filter(entry => (entry.direct?.text || entry.automatic?.text) && !connected.has(entry.key));
+    const existing = list.querySelector('.peek-greeting-reference');
+    const translated = detached.map(entry => displayGreetingText(entry.direct?.text || entry.automatic?.text));
+    const signature = JSON.stringify(detached.map((entry, index) => [entry.key, translated[index]]));
+    if (existing?.dataset.signature === signature) return;
+    existing?.remove();
+    if (!detached.length) return;
+    const references = document.createElement('section');
+    references.className = 'peek-greeting-reference';
+    references.dataset.signature = signature;
+    const heading = document.createElement('strong');
+    heading.textContent = 'Peek에 저장된 그리팅';
+    references.append(heading);
+    for (const [index, entry] of detached.entries()) {
+        const item = document.createElement('details');
+        const title = document.createElement('summary');
+        title.textContent = `${entry.label} · ${entry.authored ? '직접 작성' : '저장된 번역'}`;
+        const content = document.createElement('p');
+        const text = translated[index];
+        content.textContent = text;
+        const copy = greetingButton('복사', () => copyTextWithFeedback(text, copy));
+        item.append(title, content, copy);
+        references.append(item);
+    }
+    list.append(references);
+}
+
+let greetingDisplayFrame;
+function scheduleGreetingDisplay() {
+    if (greetingDisplayFrame !== undefined) return;
+    greetingDisplayFrame = requestAnimationFrame(() => {
+        greetingDisplayFrame = undefined;
+        refreshGreetingDisplay();
+    });
+}
+
+function refreshGreetingDisplay() {
+    const settings = loadSettings();
+    const avatar = getCurrentCharKey();
+    const char = getCurrentChar();
+    const canDisplay = (settings.chatGreetingTranslations || settings.listGreetingTranslations)
+        && avatar && char && !getContext().groupId;
+    if (!canDisplay) {
+        clearGreetingOverlays(document);
+        return;
+    }
+    if (!isEntityLoaded('char', avatar)) {
+        // The character panel already loads the same entity on chat changes.
+        clearGreetingOverlays(document);
+        return;
+    }
+    const entries = greetingEntries(char, peekData.translations[avatar], peekData.greetingAdditions[avatar]);
+    const opening = chat[0];
+    const chatContainer = document.getElementById('chat');
+    const chatRow = chatContainer?.querySelector('.mes[mesid="0"]');
+    const original = chatRow?.querySelector('.mes_text');
+    const currentSwipe = Number(opening?.swipe_id ?? 0);
+    if (chatRow && settings.listGreetingTranslations && original && (opening?.swipes?.length ?? 0) <= 1
+        && !opening?.is_user && !opening?.is_system) {
+        const entry = resolveGreetingSwipe(opening, currentSwipe, entries);
+        renderGreetingReferences(original.parentElement, entries, new Set(entry ? [entry.key] : []));
+    } else {
+        chatRow?.querySelector('.peek-greeting-reference')?.remove();
+    }
+    const selected = settings.chatGreetingTranslations && !chatRow?.querySelector('textarea.edit_textarea, .edit_textarea')
+        ? preferredGreeting(resolveGreetingSwipe(opening, currentSwipe, entries)) : undefined;
+    showGreetingOverlay(original, selected);
+
+    for (const list of document.querySelectorAll('.swipe_picker_div')) {
+        const dialog = list.closest('dialog');
+        if (!settings.listGreetingTranslations || !dialog?.open || !dialog.querySelector('[id="swipe_picker_id_0"]')) {
+            clearGreetingOverlays(list);
+            continue;
+        }
+        const connected = new Set();
+        for (const row of list.querySelectorAll('.swipe_picker_block[data-swipe-id]')) {
+            const index = Number(row.dataset.swipeId);
+            const entry = resolveGreetingSwipe(opening, index, entries);
+            const translation = preferredGreeting(entry);
+            if (entry && (translation || !entry.direct?.text && !entry.automatic?.text)) connected.add(entry.key);
+            // Place the translation inside the preview so the host's expand,
+            // collapse, and selection behavior still applies to the row.
+            const preview = row.querySelector('.select_chat_block_mes');
+            if (!preview) continue;
+            let overlay = preview.querySelector('.peek-greeting-overlay');
+            if (!translation) {
+                restoreGreetingPreview(preview);
+                continue;
+            }
+            if (!overlay) {
+                const source = document.createElement('span');
+                source.className = 'peek-greeting-preview-source';
+                source.hidden = true;
+                source.append(...preview.childNodes);
+                overlay = document.createElement('span');
+                overlay.className = 'peek-greeting-overlay';
+                preview.append(source, overlay);
+            }
+            const text = displayGreetingText(translation.text);
+            if (overlay.textContent !== text) overlay.textContent = text;
+            preview.classList.add('peek-greeting-preview');
+        }
+        if (connected.size || opening && list.querySelector('.swipe_picker_block')) {
+            renderGreetingReferences(list, entries, connected);
+        }
+    }
+}
+
+function observeGreetingDisplay() {
+    const selector = '.swipe_picker_div, .mes[mesid="0"]';
+    const observer = new MutationObserver(records => {
+        const settings = loadSettings();
+        if (!settings.chatGreetingTranslations && !settings.listGreetingTranslations) return;
+        const relevant = records.some(record => {
+            const target = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+            if (target?.closest('.peek-greeting-overlay, .peek-greeting-reference')) return false;
+            if (target?.closest(selector) || target?.matches('dialog') && target.querySelector('.swipe_picker_div')) return true;
+            return [...record.addedNodes].some(node => node.nodeType === Node.ELEMENT_NODE
+                && (node.matches(selector) || node.querySelector(selector)));
+        });
+        if (relevant) scheduleGreetingDisplay();
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['open'] });
+    for (const event of [event_types.CHAT_CHANGED, event_types.MESSAGE_SWIPED, event_types.MESSAGE_UPDATED, event_types.CHARACTER_MESSAGE_RENDERED, event_types.PERSONA_CHANGED]) {
+        if (event) eventSource.on(event, scheduleGreetingDisplay);
+    }
 }
 
 /**
@@ -2186,6 +2518,7 @@ const BACKUP_SECTIONS = {
     personaManualTranslations: 1,
     notes: 1,
     personaNotes: 1,
+    greetingAdditions: 2,
 };
 
 const BACKUP_FORMAT = 'peek-backup';
@@ -2195,6 +2528,7 @@ const SECTION_KIND = {
     translations: 'char',
     manualTranslations: 'char',
     notes: 'char',
+    greetingAdditions: 'char',
     personaTranslations: 'persona',
     personaManualTranslations: 'persona',
     personaNotes: 'persona',
@@ -2392,6 +2726,7 @@ async function importPeekData(file, overwrite) {
     const personaCount = countSection(data.personaTranslations, 1);
     const manualCount = countSection(data.manualTranslations, 1) + countSection(data.personaManualTranslations, 1);
     const noteCount = countSection(data.notes, 1) + countSection(data.personaNotes, 1);
+    const greetingCount = countSection(data.greetingAdditions, 2);
 
     const modeText = overwrite
         ? '<b style="color:#e8a33d;">덮어쓰기</b> — 같은 키는 파일 내용으로 교체돼'
@@ -2404,6 +2739,7 @@ async function importPeekData(file, overwrite) {
             <pre style="white-space:pre-wrap;font-size:0.9em;opacity:0.85;margin:8px 0;">• 캐릭터 번역: ${charCount}명 / ${charFields}개 필드
 • 페르소나 번역: ${personaCount}개
 • 수동 번역: ${manualCount}개
+• 직접 추가한 그리팅: ${greetingCount}개
 • 메모: ${noteCount}개</pre>
             <p style="font-size:0.9em;">모드: ${modeText}</p>
             <p style="font-size:0.85em;opacity:0.7;">진행 전에 <b>지금 상태를 파일로 자동 백업</b>할게.</p>
@@ -2525,7 +2861,7 @@ async function migrateLegacyToFiles() {
             const back = await readEntityFile(entry.file);
             if (!back || back.key !== e.key) throw new Error('키 불일치');
             const expect = collectEntityData(e.kind, e.key);
-            const norm = (o) => JSON.stringify({ auto: o.auto ?? null, manual: o.manual ?? null, note: o.note ?? null });
+            const norm = (o) => JSON.stringify({ auto: o.auto ?? null, manual: o.manual ?? null, note: o.note ?? null, greetings: o.greetings ?? null });
             if (norm(back) !== norm(expect)) throw new Error('내용 불일치');
         } catch (err) {
             console.error('[Peek] 이전 실패:', id, err);
@@ -2638,6 +2974,8 @@ function renderSettingsPanel() {
 
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
+                        <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="listGreetingTranslations" ${settings.listGreetingTranslations ? 'checked' : ''}> 그리팅·스와이프 목록에 번역 표시</label>
+                        <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="chatGreetingTranslations" ${settings.chatGreetingTranslations ? 'checked' : ''}> 채팅에 그리팅 번역 표시</label>
 
                         <div class="peek-status" id="peek_status"></div>
 
@@ -2697,6 +3035,13 @@ function renderSettingsPanel() {
  * 설정 UI 이벤트 바인딩
  */
 function bindSettingsEvents() {
+    document.querySelectorAll('#peek_settings [data-greeting-setting]').forEach(checkbox => {
+        checkbox.addEventListener('change', () => {
+            loadSettings()[checkbox.dataset.greetingSetting] = checkbox.checked;
+            saveSettingsDebounced();
+            scheduleGreetingDisplay();
+        });
+    });
     const profileSelect = document.getElementById('peek_profile_select');
     if (profileSelect) {
         profileSelect.addEventListener('change', (e) => {
@@ -2806,6 +3151,7 @@ function onCharacterContextChange() {
  */
 jQuery(async () => {
     loadSettings();
+    observeGreetingDisplay();
 
     // 설정 UI 그리기 (DOM 준비될 때까지 살짝 대기)
     setTimeout(() => {

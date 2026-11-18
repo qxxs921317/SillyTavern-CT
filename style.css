@@ -728,3 +728,36 @@
 #peek_greeting_panel .peek-greeting-body .peek-field-content {
     overflow-wrap: anywhere;
 }
+
+#peek_greeting_panel [hidden] { display: none; }
+#peek_greeting_panel .peek-greeting-open {
+    width: 100%;
+    padding: 0;
+    border: 0;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    font-size: 0.75em;
+}
+#peek_greeting_panel .peek-greeting-open::after { content: '+'; float: right; }
+#peek_greeting_panel.peek-greeting-empty .peek-greeting-heading { margin-bottom: 0; }
+#peek_greeting_panel .peek-greeting-has-direct::after {
+    content: '•';
+    color: var(--SmartThemeQuoteColor, currentColor);
+    margin-left: 4px;
+}
+#peek_greeting_panel .peek-field-header { flex-wrap: wrap; }
+#peek_greeting_panel .peek-greeting-add { margin-left: 4px; }
+.peek-greeting-original { display: none !important; }
+.mes:has(.edit_textarea) .peek-greeting-original { display: revert !important; }
+.mes:has(.edit_textarea) .peek-greeting-overlay { display: none; }
+.peek-greeting-overlay { white-space: pre-wrap; overflow-wrap: anywhere; }
+.mes > * > .peek-greeting-overlay { line-height: 1.5; }
+.peek-greeting-preview-source { display: none !important; }
+.select_chat_block_mes .peek-greeting-overlay { white-space: inherit; }
+.peek-greeting-reference {
+    padding: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+}
+.peek-greeting-reference p { white-space: pre-wrap; overflow-wrap: anywhere; }
