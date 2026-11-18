@@ -21,7 +21,8 @@ SillyTavern → Extensions → Install Extension → 이 GitHub 레포 URL 붙�
 1. **연결 프로필 만들기** (없으면): SillyTavern의 Connection Manager에서 번역용 API 프로필 생성. Gemini Flash나 Claude Haiku처럼 빠르고 싼 모델 추천.
 2. **확장 패널 열기**: Extensions 탭 → Peek 👀 펼치기.
 3. **프로필 선택** → **번역할 필드 체크** → **번역하기** 클릭.
-4. 확인창 뜨면 OK. 잠시 후 캐릭터 카드 아래에 번역 결과가 뜸.
+4. 확인창에서 번역할 항목을 확인해요. 기본적으로 이미 번역된 카드 필드와 그리팅을 건너뛰므로, 새 ALT를 하나 추가했다면 해당 그리팅만 번역해요.
+5. 기존 자동번역을 새로 만들려면 **기존 번역도 다시 번역**을 켜요. 선택한 항목의 자동번역을 갱신하며, **직접 추가**한 그리팅은 별도로 보관돼요.
 
 ## First Message에서 그리팅 번역 관리하기
 

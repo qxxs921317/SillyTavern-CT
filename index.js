@@ -50,6 +50,7 @@ function savedAltGreetings(auto) {
 const defaultSettings = {
     profileId: '',
     listGreetingTranslations: false,
+    retranslateExistingFields: false,
     selectedFields: ['description'],  // 캐릭터 카드 기본은 description만 체크
     panelCollapsed: false,
     personaPanelCollapsed: false,
@@ -604,10 +605,15 @@ async function runTranslation() {
         return;
     }
 
-    const fieldsToTranslate = characterTranslationTargets(char, settings.selectedFields);
+    const targets = characterTranslationTargets(char, settings.selectedFields);
+    const retranslate = settings.retranslateExistingFields;
+    await ensureEntity('char', charKey);
+    const hasTranslation = key => Boolean(peekData.translations[charKey]?.[key]?.text?.trim()
+        || peekData.greetingAdditions[charKey]?.[key]?.text?.trim());
+    const fieldsToTranslate = retranslate ? targets : targets.filter(field => !hasTranslation(field.key));
 
     if (fieldsToTranslate.length === 0) {
-        toastr.info('번역할 내용이 없어 (해당 필드들이 비어있음)', EXT_NAME);
+        toastr.info(targets.length ? '선택한 항목은 모두 번역돼 있어' : '번역할 내용이 없어 (해당 필드들이 비어있음)', EXT_NAME);
         return;
     }
 
@@ -627,7 +633,9 @@ async function runTranslation() {
         `<div style="text-align:left;">
             <p><b>${escapeHtml(charName)}</b>의 다음 필드를 <b>${escapeHtml(profileName)}</b>으로 번역할까?</p>
             <pre style="white-space:pre-wrap;font-size:0.9em;opacity:0.85;margin:8px 0;">${fieldList.join('\n')}</pre>
-            <p style="font-size:0.85em;opacity:0.7;">기존 번역이 있으면 덮어쓸거야.</p>
+            <p style="font-size:0.85em;opacity:0.7;">${retranslate
+                ? '선택한 항목의 기존 자동번역을 새 번역으로 바꿀 거야.'
+                : `이미 번역된 항목 ${targets.length - fieldsToTranslate.length}개는 건너뛸 거야.`}</p>
         </div>`
     );
 
@@ -667,8 +675,13 @@ async function runTranslation() {
         if (success) {
             await queueEntityWrite('char', charKey, async () => {
                 await ensureEntity('char', charKey);
-                peekData.translations[charKey] = { ...peekData.translations[charKey], ...translatedFields };
-                await persistEntityImmediately('char', charKey);
+                const updates = Object.fromEntries(Object.entries(translatedFields)
+                    .filter(([key]) => retranslate || !hasTranslation(key)));
+                if (Object.keys(updates).length) {
+                    peekData.translations[charKey] = { ...peekData.translations[charKey], ...updates };
+                    await persistEntityImmediately('char', charKey);
+                }
+                success = Object.keys(updates).length;
             });
         }
     } catch (err) {
@@ -679,7 +692,9 @@ async function runTranslation() {
         renderTranslationPanel();
     }
 
-    if (success > 0 && failed === 0) {
+    if (success === 0 && failed === 0) {
+        toastr.info('번역하는 동안 해당 항목에 번역이 저장됐어.', EXT_NAME);
+    } else if (success > 0 && failed === 0) {
         toastr.success(`${success}개 필드 번역 완료!`, EXT_NAME);
     } else if (success > 0 && failed > 0) {
         toastr.warning(`${success}개 성공, ${failed}개 실패`, EXT_NAME);
@@ -3125,6 +3140,7 @@ function renderSettingsPanel() {
 
                         <label><b>캐릭터 카드 번역 시 포함할 필드</b></label>
                         <div class="peek-fields-grid">${fieldCheckboxes}</div>
+                        <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="retranslateExistingFields" ${settings.retranslateExistingFields ? 'checked' : ''}> 기존 번역도 다시 번역</label>
                         <label class="peek-field-checkbox"><input type="checkbox" data-greeting-setting="listGreetingTranslations" ${settings.listGreetingTranslations ? 'checked' : ''}> 그리팅·스와이프 목록에 번역 표시</label>
 
                         <div class="peek-status" id="peek_status"></div>

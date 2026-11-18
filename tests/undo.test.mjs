@@ -18,7 +18,7 @@ function harness() {
         jQuery: () => {},
         getContext: () => ({ getRequestHeaders: () => ({ 'Content-Type': 'application/json' }) }),
         saveSettingsDebounced: () => {},
-        toastr: { warning() {}, error() {}, success() {} },
+        toastr: { info() {}, warning() {}, error() {}, success() {} },
         console: { warn() {}, error() {}, log() {} },
         fetch: async (url, options = {}) => {
             const payload = options.body ? JSON.parse(options.body) : null;
@@ -169,22 +169,48 @@ test('macro preservation takes priority in the prompt without rejecting a change
     assert.equal(calls, 1);
 });
 
-test('translating only ALT keeps the existing default greeting on disk', async () => {
+test('default translation requests only new greetings and explicit retranslation updates automatic fields', async () => {
     const h = harness();
-    const firstMes = { text: '기존 기본 그리팅', translatedAt: 1 };
-    await seed(h, 'char', { first_mes: firstMes });
-    h.settings.peek.selectedFields = ['alternate_greetings'];
+    const key = 'target.png';
+    const existing = {
+        description: { text: '기존 캐릭터 설명' },
+        first_mes: { text: '기존 기본 그리팅' },
+        alt_greeting_1: { text: '기존 ALT 번역' },
+    };
+    const greetings = { alt_greeting_2: { text: '직접 추가본' } };
+    h.storage.applyEntityData('char', key, { auto: structuredClone(existing), greetings });
+    await h.storage.persistEntity('char', key);
+    h.settings.peek.selectedFields = ['description', 'first_mes', 'alternate_greetings'];
     h.settings.peek.profileId = 'profile';
     h.context.this_chid = 0;
-    h.context.characters.push({ avatar: 'target.png', data: { first_mes: 'Default', alternate_greetings: ['Extra'] } });
+    h.context.characters.push({ avatar: key, data: {
+        description: 'Description', first_mes: 'Default', alternate_greetings: ['Extra one', 'Extra two', 'Extra three'],
+    } });
     h.context.Popup = { show: { confirm: async () => true } };
     h.context.document = { getElementById: () => null, querySelector: () => null };
     h.context.renderTranslationPanel = () => {};
-    h.context.ConnectionManagerRequestService = { sendRequest: async () => ({ content: '새 ALT 번역' }) };
+    const requests = [];
+    h.context.ConnectionManagerRequestService = {
+        async sendRequest(profile, prompt) {
+            requests.push(prompt.split('---SOURCE---\n')[1].split('\n---END SOURCE---')[0]);
+            return { content: '새 자동번역' };
+        },
+    };
+    const file = h.storage.entityFileName('char', key);
     await h.storage.runTranslation();
-    const { auto } = h.files.get(h.storage.entityFileName('char', 'target.png'));
-    assert.deepEqual(auto.first_mes, firstMes);
-    assert.equal(auto.alt_greeting_1.text, '새 ALT 번역');
+    assert.deepEqual(requests, ['Extra three']);
+    const { alt_greeting_3: newGreeting, ...previous } = h.files.get(file).auto;
+    assert.deepEqual(previous, existing);
+    assert.equal(newGreeting.text, '새 자동번역');
+    assert.deepEqual(h.files.get(file).greetings, greetings);
+
+    await h.storage.runTranslation();
+    assert.deepEqual(requests, ['Extra three']);
+    h.settings.peek.retranslateExistingFields = true;
+    await h.storage.runTranslation();
+    assert.deepEqual(requests.slice(1), ['Description', 'Default', 'Extra one', 'Extra two', 'Extra three']);
+    assert.equal(h.files.get(file).auto.description.text, '새 자동번역');
+    assert.deepEqual(h.files.get(file).greetings, greetings);
 });
 
 test('direct additions and authored greetings persist separately from searched and restored auto translations', async () => {
