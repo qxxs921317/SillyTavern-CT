@@ -755,6 +755,20 @@
 }
 .peek-greeting-reference p { white-space: pre-wrap; overflow-wrap: anywhere; }
 
+.peek-greeting-picker-shortcut {
+    margin: 4px 0;
+    padding: 2px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: var(--SmartThemeBlurTintColor);
+    color: inherit;
+    font: inherit;
+    font-size: 0.8em;
+    cursor: pointer;
+}
+.peek-greeting-picker-shortcut:focus-visible { outline: 2px solid var(--SmartThemeQuoteColor, currentColor); }
+.mes:has(.edit_textarea) .peek-greeting-picker-shortcut { display: none; }
+
 /* A modal has both vertical insets set. Auto height stretches between them. */
 .popup.peek-swipe-dialog {
     height: fit-content !important;
@@ -821,6 +835,10 @@
     min-height: 0;
 }
 
+.peek-swipe-single .peek-swipe-layout {
+    grid-template-columns: minmax(0, 1fr);
+}
+
 .peek-swipe-layout nav {
     display: flex;
     flex-direction: column;
@@ -868,7 +886,10 @@
 .peek-swipe-references .peek-greeting-reference { margin-top: 8px; }
 
 @media (max-width: 620px) {
-    .peek-swipe-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .peek-swipe-picker:not(.peek-swipe-single) .peek-swipe-layout {
+        grid-template-columns: minmax(0, 1fr);
+        grid-template-rows: auto minmax(0, 1fr);
+    }
     .peek-swipe-layout nav { flex-direction: row; overflow-x: auto; border: 0; border-bottom: 1px solid var(--peek-swipe-border); }
     .peek-swipe-layout nav button { flex: 0 0 auto; }
     .peek-swipe-compare { grid-template-columns: minmax(0, 1fr); }

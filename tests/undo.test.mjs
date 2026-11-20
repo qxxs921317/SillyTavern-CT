@@ -278,3 +278,31 @@ test('links track recorded source across index changes and expire when original 
     auto.alt_greeting_1.text = '수정됨';
     assert.equal(storage.activeGreetingLink(message, 2, entries, links, 'target.png'), undefined);
 });
+
+test('default greeting links survive a 1/1 message gaining swipe data and resolving name macros', () => {
+    const { storage, context } = harness();
+    context.name1 = 'Sam';
+    context.this_chid = 0;
+    context.characters.push({ name: 'Alex' });
+    const source = '{{char}} greeted {{user}}.';
+    const text = '{{char}}는 {{user}}에게 인사했다.';
+    const avatar = 'target.png';
+    const entries = storage.greetingEntries({ first_mes: source }, { first_mes: { source, text } });
+    const opening = { mes: source };
+    const links = { 0: { avatar, key: 'first_mes', source, text } };
+    assert.equal(storage.greetingLinkCandidate(opening, 0, entries).entry.key, 'first_mes');
+    assert.equal(storage.activeGreetingLink(opening, 0, entries, links, avatar).text, text);
+
+    opening.mes = 'Alex greeted Sam.';
+    opening.swipes = ['Alex greeted Sam.\r\n'];
+    opening.swipe_id = 0;
+    assert.equal(storage.activeGreetingLink(opening, 0, entries, links, avatar).text, text);
+
+    const resolvedLinks = { 0: { ...links[0], source: opening.mes } };
+    opening.swipes[0] = source;
+    assert.equal(storage.activeGreetingLink(opening, 0, entries, resolvedLinks, avatar).text, text);
+
+    opening.swipes[0] = 'Alex greeted someone else.';
+    assert.equal(storage.activeGreetingLink(opening, 0, entries, links, avatar), undefined);
+    assert.equal(storage.activeGreetingLink(opening, 0, entries, resolvedLinks, avatar), undefined);
+});
