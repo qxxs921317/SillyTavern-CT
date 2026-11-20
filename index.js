@@ -1850,7 +1850,8 @@ function mountGreetingPicker(dialog, list, opening, entries, avatar, popup = nul
         title.textContent = swipeCount === 1 ? '기본 그리팅'
             : `스와이프 #${selected + 1}${selected === current ? ' · 현재' : ''}`;
         sourceBody.textContent = opening.swipes?.[selected] ?? (selected === 0 ? opening.mes : '') ?? '';
-        translatedBody.textContent = choice ? displayGreetingText(choice.record.text) : '연결할 저장본을 선택해 주세요.';
+        translatedBody.textContent = choice ? displayGreetingText(choice.record.text)
+            : choices.length ? '연결할 저장본을 선택해 주세요.' : '저장된 그리팅 번역이 없어요.';
         apply.textContent = link ? '번역 해제' : choice && !choice.direct && status.textContent === '원문 일치' ? '번역 적용' : '이 원문에 연결';
         apply.disabled = saving || !source || (!choice && !link);
         if (go) {
@@ -1971,20 +1972,21 @@ function refreshGreetingDisplay() {
     const entries = greetingEntries(char, peekData.translations[avatar], peekData.greetingAdditions[avatar]);
     const currentSwipe = Number(opening?.swipe_id ?? 0);
     const hasSingleGreeting = (opening?.swipes?.length ?? 0) <= 1;
-    const canOpenShortcut = settings.listGreetingTranslations && original && opening
+    const messageMenu = chatRow?.querySelector('.extraMesButtons');
+    const canOpenShortcut = settings.listGreetingTranslations && messageMenu && opening
         && (hasSingleGreeting || chat.length > 1)
-        && (hasSingleGreeting ? swipeOriginal(opening, 0) : opening.swipes.some((_, index) => swipeOriginal(opening, index)))
-        && entries.some(entry => !entry.authored && (entry.automatic?.text || entry.direct?.text));
+        && (hasSingleGreeting ? swipeOriginal(opening, 0) : opening.swipes.some((_, index) => swipeOriginal(opening, index)));
     let shortcut = chatRow?.querySelector('.peek-greeting-picker-shortcut');
     if (canOpenShortcut) {
         if (!shortcut) {
             shortcut = document.createElement('button');
             shortcut.type = 'button';
-            shortcut.className = 'peek-greeting-picker-shortcut';
-            shortcut.textContent = '그리팅 번역';
+            shortcut.className = 'mes_button peek-greeting-picker-shortcut fa-solid fa-book-open';
+            shortcut.title = 'Peek · 그리팅 번역';
+            shortcut.setAttribute('aria-label', shortcut.title);
         }
         shortcut.onclick = () => openStandaloneGreetingPicker(opening, entries, avatar);
-        if (shortcut.nextElementSibling !== original) original.before(shortcut);
+        if (shortcut.parentElement !== messageMenu) messageMenu.append(shortcut);
     } else {
         shortcut?.remove();
     }

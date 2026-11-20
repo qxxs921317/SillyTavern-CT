@@ -755,16 +755,11 @@
 }
 .peek-greeting-reference p { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.peek-greeting-picker-shortcut {
-    margin: 4px 0;
-    padding: 2px 8px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 6px;
-    background: var(--SmartThemeBlurTintColor);
+.extraMesButtons .peek-greeting-picker-shortcut {
+    flex: 0 0 auto;
+    border: 0;
+    background: transparent;
     color: inherit;
-    font: inherit;
-    font-size: 0.8em;
-    cursor: pointer;
 }
 .peek-greeting-picker-shortcut:focus-visible { outline: 2px solid var(--SmartThemeQuoteColor, currentColor); }
 .mes:has(.edit_textarea) .peek-greeting-picker-shortcut { display: none; }
