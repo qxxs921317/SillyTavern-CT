@@ -1718,7 +1718,7 @@ function mountGreetingPicker(dialog, list, opening, entries, avatar, popup = nul
     const nativeGo = dialog.querySelector('.popup-button-ok');
     const nativeClose = dialog.querySelector('.popup-button-close');
     const metadata = getContext().chatMetadata;
-    const swipeCount = opening?.swipes?.length || (swipeOriginal(opening, 0) ? 1 : 0);
+    const swipeCount = opening?.swipes?.length || (opening?.mes?.trim() ? 1 : 0);
     if ((!input && !popup) || !metadata || !swipeCount || dialog.dataset.peekNativePicker === 'true'
         || dialog.querySelector('.peek-swipe-picker')) return null;
     const canGo = nativeGo && !nativeGo.hidden && getComputedStyle(nativeGo).display !== 'none';
@@ -1974,16 +1974,23 @@ function refreshGreetingDisplay() {
     const hasSingleGreeting = (opening?.swipes?.length ?? 0) <= 1;
     const messageMenu = chatRow?.querySelector('.extraMesButtons');
     const canOpenShortcut = settings.listGreetingTranslations && messageMenu && opening
-        && (hasSingleGreeting || chat.length > 1)
-        && (hasSingleGreeting ? swipeOriginal(opening, 0) : opening.swipes.some((_, index) => swipeOriginal(opening, index)));
+        && !opening.is_user && !opening.is_system && (opening.mes?.trim() || opening.swipes?.length);
     let shortcut = chatRow?.querySelector('.peek-greeting-picker-shortcut');
     if (canOpenShortcut) {
         if (!shortcut) {
-            shortcut = document.createElement('button');
-            shortcut.type = 'button';
+            // Match SillyTavern's other actions so mobile themes also style it.
+            shortcut = document.createElement('div');
             shortcut.className = 'mes_button peek-greeting-picker-shortcut fa-solid fa-book-open';
             shortcut.title = 'Peek · 그리팅 번역';
+            shortcut.tabIndex = 0;
+            shortcut.setAttribute('role', 'button');
             shortcut.setAttribute('aria-label', shortcut.title);
+            shortcut.onkeydown = event => {
+                if (event.key !== 'Enter' && event.key !== ' ') return;
+                event.preventDefault();
+                event.stopPropagation();
+                shortcut.click();
+            };
         }
         shortcut.onclick = () => openStandaloneGreetingPicker(opening, entries, avatar);
         if (shortcut.parentElement !== messageMenu) messageMenu.append(shortcut);
