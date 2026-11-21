@@ -40,6 +40,18 @@
     min-height: 1.2em;
 }
 
+#peek_translation_diagnostics {
+    padding-top: 6px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+    font-size: 0.85em;
+}
+#peek_translation_diagnostics summary { cursor: pointer; }
+#peek_translation_diagnostics small,
+#peek_translation_diagnostics .peek-diagnostic-tokens { opacity: 0.75; }
+#peek_translation_diagnostics p { margin: 4px 0 0; }
+#peek_translation_diagnostics button { margin: 6px 0 0 auto; }
+#peek_translation_diagnostics [hidden] { display: none !important; }
+
 /* --- 캐릭터 카드 아래 번역 표시 영역 (공통) --- */
 #peek_translation_panel,
 #peek_greeting_panel,

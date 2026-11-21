@@ -496,8 +496,8 @@ async function translateWithProfile(profileId, fieldLabel, sourceText) {
     const maxTokens = extension_settings[EXT_ID]?.maxResponseTokens || 8192;
 
     // 1차 시도 + 빈 응답 시 1회 재시도
-    let lastRaw = null;
     for (let attempt = 1; attempt <= 2; attempt++) {
+        const diagnostics = { field: fieldLabel, attempt, requestedMaxTokens: maxTokens, sourceChars: sourceText.length };
         try {
             // extractData: false → raw 응답 객체 반환 (OpenAI 호환 구조)
             const result = await service.sendRequest(
@@ -506,24 +506,18 @@ async function translateWithProfile(profileId, fieldLabel, sourceText) {
                 maxTokens,
                 { extractData: false }
             );
-            lastRaw = result;
-
-            const text = extractTextFromResponse(result);
-            if (text && text.trim().length > 0) {
-                return text.trim();
-            }
-
-            console.warn(`[Peek] ${fieldLabel} 응답 비어있음 (시도 ${attempt}/2). raw:`, result);
+            const text = extractTextFromResponse(result).trim();
+            logTranslationResponseIssue(result, text, diagnostics);
+            if (text) return text;
         } catch (err) {
             // sendRequest가 throw한 경우 — extractData 옵션 미지원 옛 버전일 수도 있어서 폴백
             if (attempt === 1) {
                 console.warn(`[Peek] extractData 옵션 사용 실패, 기본 모드로 폴백:`, err);
                 try {
                     const result = await service.sendRequest(profileId, prompt, maxTokens);
-                    lastRaw = result;
-                    if (result && result.content && result.content.trim()) {
-                        return result.content.trim();
-                    }
+                    const text = typeof result?.content === 'string' ? result.content.trim() : '';
+                    logTranslationResponseIssue(result, text, diagnostics);
+                    if (text) return text;
                 } catch (err2) {
                     console.error(`[Peek] 폴백 호출도 실패:`, err2);
                     if (attempt === 2) throw err2;
@@ -534,9 +528,61 @@ async function translateWithProfile(profileId, fieldLabel, sourceText) {
         }
     }
 
-    // 2회 다 빈 응답
-    console.error('[Peek] 번역 실패 - 최종 raw 응답:', lastRaw);
-    throw new Error('응답이 비어있어 (Vertex AI safety filter나 모델 거부일 가능성. 콘솔에 raw 응답 출력됨)');
+    throw new Error('응답이 비어있어. 콘솔의 [Peek] 번역 응답 진단을 확인해줘.');
+}
+
+const TRANSLATION_STOP_CAUSES = {
+    length: 'token_limit',
+    max_tokens: 'token_limit',
+    max_output_tokens: 'token_limit',
+    max_completion_tokens: 'token_limit',
+    context_length_exceeded: 'context_limit',
+    model_context_window_exceeded: 'context_limit',
+    content_filter: 'content_filter',
+    safety: 'content_filter',
+    recitation: 'content_filter',
+    blocklist: 'content_filter',
+    prohibited_content: 'content_filter',
+    spii: 'content_filter',
+    refusal: 'refusal',
+    stop_sequence: 'stop_sequence',
+};
+
+let latestTranslationDiagnostic;
+
+function logTranslationResponseIssue(result, text, diagnostics) {
+    const reasons = [
+        result?.choices?.[0]?.finish_reason,
+        result?.candidates?.[0]?.finishReason,
+        result?.finish_reason,
+        result?.finishReason,
+        result?.stop_reason,
+        result?.incomplete_details?.reason,
+        result?.promptFeedback?.blockReason,
+    ].filter(reason => typeof reason === 'string').map(reason => reason.trim());
+    const reason = reasons.find(value => Object.hasOwn(TRANSLATION_STOP_CAUSES, value.toLowerCase()));
+    const cause = reason ? TRANSLATION_STOP_CAUSES[reason.toLowerCase()]
+        : result?.status === 'incomplete' ? 'incomplete'
+            : !text ? 'empty_response' : null;
+    if (!cause) return;
+
+    const usage = result?.usage;
+    const geminiUsage = result?.usageMetadata;
+    const tokenCounts = {
+        inputTokens: usage?.prompt_tokens ?? usage?.input_tokens ?? geminiUsage?.promptTokenCount,
+        outputTokens: usage?.completion_tokens ?? usage?.output_tokens ?? geminiUsage?.candidatesTokenCount,
+        reasoningTokens: usage?.completion_tokens_details?.reasoning_tokens
+            ?? usage?.output_tokens_details?.reasoning_tokens ?? geminiUsage?.thoughtsTokenCount,
+    };
+    latestTranslationDiagnostic = {
+        ...diagnostics,
+        cause,
+        finishReason: reason ?? reasons.find(value => ['stop', 'end_turn'].includes(value.toLowerCase())) ?? null,
+        outputChars: text.length,
+        ...Object.fromEntries(Object.entries(tokenCounts).filter(([, value]) => Number.isFinite(value) && value >= 0)),
+    };
+    console.warn('[Peek] 번역 응답 진단', latestTranslationDiagnostic);
+    renderTranslationDiagnostic();
 }
 
 /**
@@ -554,10 +600,6 @@ function extractTextFromResponse(result) {
         const choice = result.choices[0];
         if (choice?.message?.content) return choice.message.content;
         if (typeof choice?.text === 'string') return choice.text;
-        // 빈 candidate 감지 (Vertex가 종종 이렇게 옴)
-        if (choice?.finish_reason && !choice?.message?.content) {
-            console.warn('[Peek] Vertex가 finish_reason은 줬지만 content가 빔. finish_reason:', choice.finish_reason);
-        }
     }
 
     // 3) Gemini native 응답 (candidates 배열)
@@ -3173,6 +3215,42 @@ function updateDataSizeDisplay() {
     }
 }
 
+const TRANSLATION_DIAGNOSTIC_LABELS = {
+    token_limit: '토큰 한도로 종료',
+    context_limit: '컨텍스트 한도로 종료',
+    content_filter: '콘텐츠 필터로 중단',
+    refusal: '모델이 응답을 거절함',
+    stop_sequence: '중지 문자열에서 종료',
+    incomplete: '응답이 완료되지 않음',
+    empty_response: '응답이 비어 있음',
+};
+
+function translationDiagnosticLines(issue) {
+    const heading = `${issue.field} · ${TRANSLATION_DIAGNOSTIC_LABELS[issue.cause]}`;
+    const number = value => value.toLocaleString('ko-KR');
+    const usage = [
+        ['요청 한도', issue.requestedMaxTokens],
+        ['입력', issue.inputTokens],
+        ['출력', issue.outputTokens],
+        ['추론', issue.reasoningTokens],
+    ].filter(([, value]) => Number.isFinite(value))
+        .map(([label, value]) => `${label} ${number(value)} 토큰`).join(' · ');
+    return [issue.finishReason ? `${heading} (${issue.finishReason})` : heading, usage];
+}
+
+function renderTranslationDiagnostic() {
+    const panel = globalThis.document?.getElementById('peek_translation_diagnostics');
+    if (!panel) return;
+    const issue = latestTranslationDiagnostic;
+    const [heading, usage] = issue ? translationDiagnosticLines(issue) : ['이 탭에서 기록된 경고가 없어요.', ''];
+    panel.querySelector('.peek-diagnostic-status').textContent = issue ? ' · 최근 경고 1건' : '';
+    panel.querySelector('.peek-diagnostic-heading').textContent = heading;
+    const tokenInfo = panel.querySelector('.peek-diagnostic-tokens');
+    tokenInfo.textContent = usage;
+    tokenInfo.hidden = !usage;
+    panel.querySelector('.peek-diagnostic-copy').hidden = !issue;
+}
+
 /**
  * 확장 설정 패널 (Extensions 탭) UI 렌더링
  */
@@ -3246,6 +3324,12 @@ function renderSettingsPanel() {
                             <input type="checkbox" id="peek_import_overwrite">
                             <span>가져올 때 덮어쓰기 <small style="opacity:0.6;">(끄면 없는 것만 추가)</small></span>
                         </label>
+                        <details id="peek_translation_diagnostics">
+                            <summary>번역 응답 진단<small class="peek-diagnostic-status"></small></summary>
+                            <p class="peek-diagnostic-heading"></p>
+                            <p class="peek-diagnostic-tokens" hidden></p>
+                            <button type="button" class="menu_button peek-diagnostic-copy" hidden>진단 복사</button>
+                        </details>
                     </div>
                 </div>
             </div>
@@ -3273,12 +3357,19 @@ function renderSettingsPanel() {
     // 이벤트 바인딩
     bindSettingsEvents();
     updateStatus();
+    renderTranslationDiagnostic();
 }
 
 /**
  * 설정 UI 이벤트 바인딩
  */
 function bindSettingsEvents() {
+    const copyDiagnostic = document.querySelector('#peek_translation_diagnostics .peek-diagnostic-copy');
+    copyDiagnostic?.addEventListener('click', () => {
+        if (!latestTranslationDiagnostic) return;
+        const lines = translationDiagnosticLines(latestTranslationDiagnostic).filter(Boolean);
+        return copyTextWithFeedback(['[Peek] 번역 응답 진단', ...lines].join('\n'), copyDiagnostic);
+    });
     document.querySelectorAll('#peek_settings [data-greeting-setting]').forEach(checkbox => {
         checkbox.addEventListener('change', () => {
             loadSettings()[checkbox.dataset.greetingSetting] = checkbox.checked;

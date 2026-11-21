@@ -174,6 +174,63 @@ test('greeting translation prompts prioritize macro preservation and guide natur
     assert.doesNotMatch(prompts[2], /write idiomatic Korean dialogue and narration/);
 });
 
+test('translation diagnostics report explicit stop reasons without logging the response or changing the saved text', async () => {
+    const { context, settings, storage } = harness();
+    const logs = [];
+    context.console.warn = (...args) => logs.push(clone(args));
+    settings.peek.maxResponseTokens = 30000;
+    const source = 'private card content';
+    const translation = '번역 도중의 본문';
+    const responses = [
+        {
+            candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: translation }] } }],
+            usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 11, thoughtsTokenCount: 9 },
+            ignored: 'private provider data',
+        },
+        { choices: [{ finish_reason: 'length', message: { content: translation } }] },
+        { stop_reason: 'max_tokens', content: [{ type: 'text', text: translation }] },
+        { choices: [{ finish_reason: 'content_filter', message: { content: translation } }] },
+        { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: translation }] } }] },
+        { content: translation },
+    ];
+    context.ConnectionManagerRequestService = {
+        async sendRequest() { return responses.shift(); },
+    };
+    for (let request = 0; request < 6; request++) {
+        assert.equal(await storage.translateWithProfile('profile', 'ALT 1', source), translation);
+    }
+    assert.deepEqual(logs.map(([label, data]) => [label, data.cause, data.finishReason]), [
+        ['[Peek] 번역 응답 진단', 'token_limit', 'MAX_TOKENS'],
+        ['[Peek] 번역 응답 진단', 'token_limit', 'length'],
+        ['[Peek] 번역 응답 진단', 'token_limit', 'max_tokens'],
+        ['[Peek] 번역 응답 진단', 'content_filter', 'content_filter'],
+    ]);
+    assert.deepEqual(logs[0][1], {
+        field: 'ALT 1', attempt: 1, requestedMaxTokens: 30000, sourceChars: source.length,
+        cause: 'token_limit', finishReason: 'MAX_TOKENS', outputChars: translation.length,
+        inputTokens: 20, outputTokens: 11, reasoningTokens: 9,
+    });
+    const serialized = JSON.stringify(logs);
+    assert.ok(!serialized.includes(source) && !serialized.includes(translation) && !serialized.includes('private provider data'));
+});
+
+test('an empty translation logs why it was blocked on each attempt', async () => {
+    const { context, storage } = harness();
+    const logs = [];
+    context.console.warn = (_label, data) => logs.push(clone(data));
+    context.ConnectionManagerRequestService = {
+        async sendRequest() {
+            return { promptFeedback: { blockReason: 'SAFETY', blockReasonMessage: 'private model feedback' } };
+        },
+    };
+    await assert.rejects(storage.translateWithProfile('profile', 'First Message', 'private source'), /번역 응답 진단/);
+    assert.deepEqual(logs.map(({ attempt, cause, finishReason, outputChars }) => [attempt, cause, finishReason, outputChars]), [
+        [1, 'content_filter', 'SAFETY', 0],
+        [2, 'content_filter', 'SAFETY', 0],
+    ]);
+    assert.doesNotMatch(JSON.stringify(logs), /private/);
+});
+
 test('default translation requests only new greetings and explicit retranslation updates automatic fields', async () => {
     const h = harness();
     const key = 'target.png';
