@@ -1191,34 +1191,53 @@ function createPersonaPanelElement() {
     }
     if (manualTextarea) {
         const writeManual = () => {
-            const persona = getCurrentPersona();
-            if (!persona) return;
-            const settings = loadSettings();
+            const avatar = manualTextarea.dataset.peekKey;
+            if (!avatar || getCurrentPersona()?.avatar !== avatar) return;
             const val = manualTextarea.value;
             if (val.trim()) {
-                peekData.personaManualTranslations[persona.avatar] = { text: val, updatedAt: Date.now() };
+                peekData.personaManualTranslations[avatar] = { text: val, updatedAt: Date.now() };
             } else {
-                delete peekData.personaManualTranslations[persona.avatar];
+                delete peekData.personaManualTranslations[avatar];
             }
+            return avatar;
         };
         manualTextarea.addEventListener('input', () => {
-            writeManual();
-            schedulePersist('persona', persona?.avatar);
+            const avatar = writeManual();
+            if (!avatar) return;
+            schedulePersist('persona', avatar);
             panel.classList.add('peek-dirty');
         });
         if (manualSaveBtn) {
-            manualSaveBtn.addEventListener('click', (e) => {
+            const saveLabel = manualSaveBtn.textContent;
+            let savedFlashTimer;
+            manualSaveBtn.addEventListener('click', async (e) => {
                 e.stopPropagation();
-                writeManual();
-                schedulePersist('persona', persona?.avatar, 0);
-                panel.classList.remove('peek-dirty');
-                const orig = manualSaveBtn.textContent;
-                manualSaveBtn.textContent = '✓ 저장됨';
-                manualSaveBtn.classList.add('peek-saved-flash');
-                setTimeout(() => {
-                    manualSaveBtn.textContent = orig;
-                    manualSaveBtn.classList.remove('peek-saved-flash');
-                }, 1200);
+                const avatar = writeManual();
+                if (!avatar) return;
+                const text = manualTextarea.value;
+                const id = entityId('persona', avatar);
+                clearTimeout(pendingWrites.get(id));
+                pendingWrites.delete(id);
+                clearTimeout(savedFlashTimer);
+                manualSaveBtn.textContent = saveLabel;
+                manualSaveBtn.classList.remove('peek-saved-flash');
+                manualSaveBtn.disabled = true;
+                try {
+                    await persistEntity('persona', avatar);
+                    if (manualTextarea.dataset.peekKey !== avatar || manualTextarea.value !== text
+                        || getCurrentPersona()?.avatar !== avatar) return;
+                    panel.classList.remove('peek-dirty');
+                    manualSaveBtn.textContent = '✓ 저장됨';
+                    manualSaveBtn.classList.add('peek-saved-flash');
+                    savedFlashTimer = setTimeout(() => {
+                        manualSaveBtn.textContent = saveLabel;
+                        manualSaveBtn.classList.remove('peek-saved-flash');
+                    }, 1200);
+                } catch (err) {
+                    toastr.error(`저장 실패: ${err.message}`, EXT_NAME);
+                } finally {
+                    manualSaveBtn.disabled = false;
+                }
             });
         }
     }
